@@ -58,6 +58,26 @@
       <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
       <path d="M3.3 7 12 12l8.7-5"/><path d="M12 22V12"/>
     </symbol>
+    <symbol id="i-star" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>
+    </symbol>
+    <symbol id="i-truck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/>
+      <path d="M15 18H9"/>
+      <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"/>
+      <circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/>
+    </symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/>
+      <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/>
+      <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>
+    </symbol>
+    <symbol id="i-compare" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 3v18"/>
+    </symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20 6 9 17l-5-5"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -105,6 +125,8 @@
     <label>Name <span class="opt">(optional — auto-detected)</span>
       <input name="title" placeholder="Leave blank to use the page title" autocomplete="off">
     </label>
+    <p class="dlg-note">Tip: adding via the browser extension also captures MRP, rating and the
+      delivery estimate for your pincode — things server checks can't always see.</p>
     <div class="dlg-actions">
       <button type="button" class="btn" data-close>Cancel</button>
       <button type="submit" class="btn btn-primary">Start tracking</button>
@@ -123,7 +145,9 @@
     <label>API token
       <input name="token" type="password" placeholder="Same value as the API_TOKEN Worker secret" autocomplete="off">
     </label>
-    <p class="dlg-note">Needed for adding, refreshing, and deleting when the Worker has an <code>API_TOKEN</code> secret. Stored only in this browser.</p>
+    <p class="dlg-note">Needed for adding, refreshing, grouping, and deleting when the Worker has an <code>API_TOKEN</code> secret. Stored only in this browser.</p>
+    <p class="dlg-note">Delivery estimates come from extension clicks — the store shows them for the
+      pincode set in your browser, which server-side checks never see.</p>
     <div class="dlg-actions">
       <button type="button" class="btn" data-close>Cancel</button>
       <button type="submit" class="btn btn-primary">Save</button>

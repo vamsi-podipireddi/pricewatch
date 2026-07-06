@@ -4,6 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "test": "node --test",
+    "db:migrate": "wrangler d1 execute pricewatch --remote --file=migrations/0002_v2.sql",
+    "db:migrate:local": "wrangler d1 execute pricewatch --local --file=migrations/0002_v2.sql",
     "deploy": "wrangler deploy",
     "db:init": "wrangler d1 execute pricewatch --remote --file=schema.sql",
     "db:local": "wrangler d1 execute pricewatch --local --file=schema.sql",

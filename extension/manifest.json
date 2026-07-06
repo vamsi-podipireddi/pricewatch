@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PriceWatch",
-  "version": "1.0.0",
-  "description": "One click on any product page adds it to your PriceWatch tracker, price included.",
+  "version": "1.1.0",
+  "description": "One click on any product page adds it to your PriceWatch tracker — price, MRP, rating and delivery estimate included.",
   "action": {
     "default_title": "Track this product in PriceWatch"
   },

@@ -5,6 +5,13 @@ Track any product's price from any website. Generalized successor to
 (free tier) with automatic cron syncing, plus a Chrome extension that adds
 products with one click.
 
+Beyond the price, each product carries **MRP + discount %, star rating,
+ratings count, model number, and a delivery estimate for your pincode**
+(delivery comes from extension clicks — see below). Products from different
+stores can be **grouped** ("same lens on Amazon + Flipkart") with automatic
+same-product suggestions, and any two products can be **compared** side by
+side with overlaid price-history charts.
+
 ## How it works
 
 ```
@@ -25,6 +32,17 @@ Chrome extension ──one click──► Worker API ──► D1 (products + pr
   scrapes the page you're already looking at (real browser, real session) and
   pushes the price to the API. Clicking it on an already-tracked product
   records a fresh observation — badge shows `upd`.
+- **Delivery estimates are extension-only by design.** Stores render the
+  delivery date for the pincode set in *your* browser session; a server-side
+  fetch has no location, so whatever it saw would be wrong. The extension
+  captures the delivery line + pincode on every click; the site shows it with
+  its capture time and marks it stale after ~3 days.
+- **Cross-store identity.** Amazon URLs collapse to `/dp/ASIN`, Flipkart to
+  `?pid=`, and each listing gets a canonical key (`amazon.in:B0ABC12345`) —
+  re-adding the same listing under a different URL updates the existing
+  product instead of duplicating it. Cross-*store* grouping (same product,
+  different sites) is manual: select 2+ products → Group, or accept the
+  automatic "these look alike" suggestion.
 
 ## Deploy (once)
 
@@ -97,15 +115,19 @@ All responses JSON; CORS open. Writes need `X-Auth-Token` when `API_TOKEN` is se
 | Route | What |
 | --- | --- |
 | `GET /api/health` | `{ ok, authRequired, authOk }` — extension "Test connection" |
-| `GET /api/products` | All products with `points: [{t, p}]` history |
-| `POST /api/products` | `{url}` → server scrapes; `{url, price, currency?, title?, image?}` → trusts the client (extension). Upserts by normalized URL |
+| `GET /api/products` | `{ products, groups, meta }`; products carry `points: [{t, p, m?}]` history (m = MRP), plus `mrp, rating, reviewCount, model, groupId, deliveryText/Date/Pincode/At` |
+| `POST /api/products` | `{url}` → server scrapes; extension sends `{url, price, mrp?, rating?, reviewCount?, model?, deliveryText?, deliveryDate?, deliveryPincode?, …, source:'extension'}`. Upserts by normalized URL *or* canonical key |
 | `POST /api/products/:id/refresh` | Scrape now |
-| `PATCH /api/products/:id` | `{title?, targetPrice?, archived?}` |
+| `PATCH /api/products/:id` | `{title?, targetPrice?, archived?, groupId?}` (`groupId: null` leaves the group) |
 | `DELETE /api/products/:id` | Remove product + history |
+| `POST /api/groups` | `{name, productIds: [>=2]}` |
+| `PATCH /api/groups/:id` | `{name}` |
+| `DELETE /api/groups/:id` | Dissolve — members stay tracked, ungrouped |
 
-URLs are normalized before storage: tracking params stripped (`utm_*`,
-`fbclid`, `gclid`, …), Amazon collapsed to `/dp/ASIN` — so the extension and
-a pasted URL land on the same product.
+Groups with fewer than 2 active members dissolve automatically. URLs are
+normalized before storage: tracking params stripped (`utm_*`, `fbclid`,
+`gclid`, …), Amazon collapsed to `/dp/ASIN`, Flipkart to its `pid` — so the
+extension and a pasted URL land on the same product.
 
 ## Extraction chain (server)
 
@@ -118,6 +140,26 @@ a pasted URL land on the same product.
 
 The extension adds a 5th, strongest path: the rendered DOM, with a
 biggest-visible-price heuristic that skips struck-through MRPs.
+
+Every path also collects extras where available: MRP (strike-through /
+`a-text-price` / Flipkart embedded state / Shopify `compare_at_price` — only
+kept when strictly above the price), rating + ratings count (JSON-LD
+`aggregateRating`, Amazon `#acrPopover`), and model number (JSON-LD `mpn`,
+Amazon "Item model number", Flipkart spec table). The extension additionally
+parses the delivery line into a date (`Tomorrow`, `Wednesday, 9 July`, …).
+
+## Upgrading a v1 deployment to v2
+
+Order matters — migrate the database **before** deploying the new Worker:
+
+1. Apply `migrations/0002_v2.sql` to the remote D1: dashboard → D1 →
+   `pricewatch` → Console → paste the file → Execute
+   (or `npm run db:migrate`). Running it twice errors with
+   "duplicate column name" — that just means it's already applied.
+2. Push to `main` (auto-deploys) or `npm run deploy`.
+3. Reload the extension: `chrome://extensions` → PriceWatch → reload (⟳).
+   MRP/rating/delivery appear for each product after its next check or
+   extension click.
 
 ## Free-tier constraints (why the numbers are what they are)
 
@@ -134,11 +176,13 @@ biggest-visible-price heuristic that skips struck-through MRPs.
 
 ```
 wrangler.toml        Worker config: assets, D1 binding, cron
-schema.sql           D1 schema (products, price_history)
-src/worker.js        API routes, auth, cron sweep
-src/extract.js       adapter chain + URL normalization
+schema.sql           D1 schema (products, price_history, groups) — fresh installs
+migrations/          0002_v2.sql — upgrades an existing v1 database in place
+src/worker.js        API routes, auth, groups, cron sweep
+src/extract.js       adapter chain + extras (MRP/rating/model) + URL normalization
 public/              site (vanilla JS, no build step)
 extension/           Chrome MV3: background.js (scrape + POST), options page
+test/                node --test unit tests for the extraction engine
 ```
 
 No runtime dependencies anywhere; `wrangler` is the only dev dependency.
