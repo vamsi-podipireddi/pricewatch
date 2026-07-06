@@ -12,7 +12,7 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "pricewatch"
-database_id = "PASTE_D1_DATABASE_ID_HERE" # from: npx wrangler d1 create pricewatch
+database_id = "4559b266-2e9f-4da6-94e4-038ea6cac503" # from: npx wrangler d1 create pricewatch
 
 # Every 2 hours at :11. Each run checks the SWEEP_BATCH stalest products, so a
 # product's effective cadence is 2h * ceil(count / batch).
