@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>PriceWatch — Settings</title>
+<style>
+  :root {
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
+    --muted: #898781; --border: rgba(11,11,11,0.10); --accent: #eb6834;
+    --good: #006300; --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #fff; --ink-2: #c3c2b7;
+      --muted: #898781; --border: rgba(255,255,255,0.10); --accent: #d95926;
+      --good: #0ca30c; --critical: #e66767;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px; line-height: 1.5; color: var(--ink); background: var(--page);
+    display: grid; place-items: start center; min-height: 100vh; padding: 48px 16px;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 24px; width: min(460px, 100%); display: grid; gap: 14px;
+  }
+  .head { display: flex; align-items: center; gap: 12px; }
+  .head svg { width: 28px; height: 28px; color: var(--accent); }
+  h1 { font-size: 15px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
+  .sub { font-size: 12px; color: var(--muted); }
+  label { display: grid; gap: 5px; font-size: 12.5px; color: var(--ink-2); }
+  input {
+    font: inherit; padding: 8px 11px; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--page); color: var(--ink);
+  }
+  input::placeholder { color: var(--muted); }
+  .row { display: flex; gap: 8px; justify-content: flex-end; }
+  button {
+    font: inherit; display: inline-flex; align-items: center; gap: 7px;
+    padding: 7px 13px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface); color: var(--ink); cursor: pointer;
+  }
+  .primary { background: var(--accent); border-color: transparent; color: #fff; }
+  #status { font-size: 12.5px; min-height: 18px; }
+  #status.ok { color: var(--good); }
+  #status.err { color: var(--critical); }
+  .hint { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="head">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/>
+      <circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/>
+    </svg>
+    <div>
+      <h1>PriceWatch</h1>
+      <p class="sub">Where should tracked products go?</p>
+    </div>
+  </div>
+
+  <label>PriceWatch server URL
+    <input id="server" type="url" placeholder="https://pricewatch.YOUR-SUBDOMAIN.workers.dev" autocomplete="off">
+  </label>
+  <label>API token
+    <input id="token" type="password" placeholder="Value of the API_TOKEN Worker secret" autocomplete="off">
+  </label>
+  <p class="hint">After saving, just click the PriceWatch toolbar icon on any product page. Pin the icon for one-click access.</p>
+
+  <div class="row">
+    <button id="test" type="button">Test connection</button>
+    <button id="save" class="primary" type="button">Save</button>
+  </div>
+  <p id="status" role="status"></p>
+</div>
+<script src="options.js"></script>
+</body>
+</html>

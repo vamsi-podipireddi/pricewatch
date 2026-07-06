@@ -1,0 +1,15 @@
+{
+  "name": "pricewatch",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute pricewatch --remote --file=schema.sql",
+    "db:local": "wrangler d1 execute pricewatch --local --file=schema.sql",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

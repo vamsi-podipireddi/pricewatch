@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "PriceWatch",
+  "version": "1.0.0",
+  "description": "One click on any product page adds it to your PriceWatch tracker, price included.",
+  "action": {
+    "default_title": "Track this product in PriceWatch"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": ["activeTab", "scripting", "storage"]
+}

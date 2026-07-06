@@ -1,0 +1,28 @@
+# PriceWatch — single Worker serves the site (static assets), the API, and the
+# scheduled price sweep. Free tier only: Workers + D1 + cron triggers.
+
+name = "pricewatch"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pricewatch"
+database_id = "PASTE_D1_DATABASE_ID_HERE" # from: npx wrangler d1 create pricewatch
+
+# Every 2 hours at :11. Each run checks the SWEEP_BATCH stalest products, so a
+# product's effective cadence is 2h * ceil(count / batch).
+[triggers]
+crons = ["11 */2 * * *"]
+
+[vars]
+# Products checked per cron run. Kept small to stay inside the free-tier
+# 10 ms CPU budget (regex over large HTML costs CPU).
+SWEEP_BATCH = "6"
+
+[observability]
+enabled = true
