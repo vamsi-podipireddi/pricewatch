@@ -131,6 +131,10 @@ input, select { font: inherit; }
 
 .btn-danger-text:hover { color: var(--critical); border-color: var(--critical); }
 
+.btn-danger { color: var(--critical); }
+.btn-danger:hover { border-color: var(--critical); background: color-mix(in srgb, var(--critical) 8%, transparent); }
+.btn-danger:disabled:hover { border-color: var(--border); background: var(--surface); }
+
 .btn .spin, .spin { animation: spin 1.1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {

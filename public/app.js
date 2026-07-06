@@ -643,16 +643,45 @@ function renderSelectBar() {
     document.body.appendChild(bar);
   }
   const n = state.selected.size;
+  const total = state.data.products.length;
   bar.innerHTML = `<span class="count">${n} selected</span>
     <span class="hint">2 to compare · 2+ to group</span>
+    <button class="btn btn-sm btn-ghost" data-bar="all">${n === total ? 'Clear all' : 'Select all'}</button>
     <button class="btn btn-sm" data-bar="compare" ${n === 2 ? '' : 'disabled'}>${icon('compare')}<span>Compare</span></button>
     <button class="btn btn-sm" data-bar="group" ${n >= 2 ? '' : 'disabled'}>${icon('layers')}<span>Group</span></button>
+    <button class="btn btn-sm btn-danger" data-bar="delete" ${n ? '' : 'disabled'}>${icon('trash')}<span>Delete</span></button>
     <button class="btn btn-sm btn-ghost" data-bar="cancel">Cancel</button>`;
 
   $('[data-bar="cancel"]', bar).addEventListener('click', () => {
     state.selectMode = false;
     state.selected.clear();
     render();
+  });
+  $('[data-bar="all"]', bar).addEventListener('click', () => {
+    if (state.selected.size === total) state.selected.clear();
+    else state.data.products.forEach((p) => state.selected.add(p.id));
+    renderWatch();
+  });
+  $('[data-bar="delete"]', bar).addEventListener('click', async () => {
+    const ids = [...state.selected];
+    if (!ids.length) return;
+    const names = ids
+      .map((id) => state.data.products.find((p) => p.id === id))
+      .filter(Boolean)
+      .map((p) => shortTitle(p.title || p.url, 48));
+    const preview = names.slice(0, 4).join('\n') + (names.length > 4 ? `\n…and ${names.length - 4} more` : '');
+    if (!confirm(`Stop tracking ${ids.length} ${ids.length === 1 ? 'product' : 'products'} and delete their price history?\n\n${preview}`)) return;
+    try {
+      const r = await api('/api/products/bulk-delete', 'POST', { ids });
+      state.selectMode = false;
+      state.selected.clear();
+      if (ids.includes(state.sel)) state.sel = null;
+      state.compare = null;
+      toast(`Deleted ${r.deleted} ${r.deleted === 1 ? 'product' : 'products'}.`);
+      await loadState();
+    } catch (err) {
+      toast(err.message);
+    }
   });
   $('[data-bar="compare"]', bar).addEventListener('click', () => {
     state.compare = [...state.selected];
@@ -1191,6 +1220,24 @@ function render() {
 }
 
 $('#btn-check-all').addEventListener('click', () => checkAll().catch((err) => toast(err.message)));
+
+// Refresh = re-pull saved data only (picks up extension clicks and cron runs).
+// Sync prices (above) is the one that re-scrapes stores.
+$('#btn-refresh').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  const svg = btn.querySelector('svg');
+  btn.disabled = true;
+  svg.classList.add('spin');
+  try {
+    await loadState();
+    toast('Data refreshed.');
+  } catch (err) {
+    toast('Could not refresh: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    svg.classList.remove('spin');
+  }
+});
 
 $('#btn-add').addEventListener('click', () => $('#dlg-add').showModal());
 $('#btn-settings').addEventListener('click', () => {

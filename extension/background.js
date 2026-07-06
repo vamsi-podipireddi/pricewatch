@@ -120,10 +120,19 @@ function scrapePage() {
   };
 
   let price = null;
+  let priceEl = null; // DOM element the price came from — anchors the MRP scan
   let currency = null;
   let title = null;
   let image = null;
   let ldProduct = null; // first JSON-LD Product node, reused for rating/model
+
+  // Containers that show OTHER products' prices (carousels, "similar items",
+  // sponsored rails). Their strike-through prices must never become this
+  // product's MRP.
+  const CROSS_SELL =
+    '[class*="carousel" i], [id*="carousel" i], [id*="sims" i], [id*="similar" i], ' +
+    '[class*="related" i], [class*="recommend" i], [id*="recommend" i], ' +
+    '[id*="sponsored" i], [class*="sponsored" i], [data-component-type="s-search-result"]';
 
   // 1. JSON-LD Product
   (function () {
@@ -196,6 +205,7 @@ function scrapePage() {
     );
     if (amazonEl) {
       price = parseNum(amazonEl.textContent);
+      priceEl = amazonEl;
       currency = currency || currencyFrom(amazonEl.textContent);
     }
   }
@@ -223,11 +233,12 @@ function scrapePage() {
       const size = parseFloat(getComputedStyle(el).fontSize) || 0;
       if (size > bestSize) {
         bestSize = size;
-        best = { n, text };
+        best = { n, text, el };
       }
     }
     if (best) {
       price = best.n;
+      priceEl = best.el;
       currency = currency || currencyFrom(best.text);
     }
   }
@@ -247,36 +258,98 @@ function scrapePage() {
 
   /* ----- extras: MRP ----- */
 
-  // Struck-through / "list price"-classed money near the price. Smallest
-  // candidate above the price wins (bigger ones are bundles or unrelated).
+  const MRP_SEL =
+    'del, s, strike, .a-text-price, [class*="mrp" i], [class*="strike" i], ' +
+    '[class*="old" i], [class*="was" i], [class*="list-price" i], [class*="compare" i], [class*="price" i]';
+
+  // Struck/"list price"-classed money that could be this product's MRP.
+  // Returns the parsed value or null.
+  function mrpCandidate(el) {
+    const text = (el.textContent || '').trim();
+    if (!text || text.length > 45) return null;
+    const m = MONEY_RE.exec(text);
+    if (!m) return null;
+    if (el.closest(CROSS_SELL)) return null;
+    const cls = String(el.className || '');
+    const struckTag = Boolean(el.closest('del, s, strike'));
+    const hint = /a-text-price|mrp|strike|old|was|list-price|compare|regular|cross/i.test(cls);
+    let struckStyle = false;
+    if (!struckTag && !hint) {
+      try {
+        struckStyle = /line-through/.test(getComputedStyle(el).textDecorationLine || '');
+      } catch { /* detached node */ }
+    }
+    if (!struckTag && !hint && !struckStyle) return null;
+    if (!visible(el)) return null;
+    const n = parseNum(m[2]);
+    if (n == null) return null;
+    if (price != null && (n <= price || n > price * 20)) return null;
+    return n;
+  }
+
+  // MRP resolution order:
+  //   1. Amazon buy box — "basisPrice" is the M.R.P. row; it must beat a
+  //      deal's "Was:" strike, which is also a-text-price.
+  //   2. Struck prices inside the price element's own block, walking outward —
+  //      the visual MRP always sits next to the price, so the nearest struck
+  //      value wins over anything elsewhere on the page.
+  //   3. Whole-document scan (previous behaviour), minus cross-sell rails —
+  //      a carousel item's small strike price used to win here and become a
+  //      bogus MRP.
   function findMrp() {
-    let best = null;
-    const els = document.querySelectorAll(
-      'del, s, strike, .a-text-price, [class*="mrp" i], [class*="strike" i], ' +
-      '[class*="old" i], [class*="was" i], [class*="list-price" i], [class*="compare" i], [class*="price" i]'
-    );
-    let scanned = 0;
-    for (const el of els) {
-      if (++scanned > 500) break;
-      const text = (el.textContent || '').trim();
-      if (!text || text.length > 45) continue;
-      const m = MONEY_RE.exec(text);
-      if (!m) continue;
-      const cls = String(el.className || '');
-      const struckTag = Boolean(el.closest('del, s, strike'));
-      const hint = /a-text-price|mrp|strike|old|was|list-price|compare|regular|cross/i.test(cls);
-      let struckStyle = false;
-      if (!struckTag && !hint) {
-        try {
-          struckStyle = /line-through/.test(getComputedStyle(el).textDecorationLine || '');
-        } catch { /* detached node */ }
+    for (const sel of [
+      '#corePriceDisplay_desktop_feature_div .basisPrice .a-offscreen',
+      '#corePrice_feature_div .basisPrice .a-offscreen',
+      '#apex_desktop .basisPrice .a-offscreen',
+      '#corePriceDisplay_desktop_feature_div .a-text-price .a-offscreen',
+      '#corePrice_feature_div .a-text-price .a-offscreen',
+    ]) {
+      const n = parseNum(document.querySelector(sel)?.textContent);
+      if (n != null && price != null && n > price && n < price * 20) return n;
+    }
+
+    // No price element yet (price came from JSON-LD / meta): locate the most
+    // prominent visible element showing exactly the price, to anchor step 2.
+    if (!priceEl && price != null) {
+      let bestSize = 0;
+      let scanned = 0;
+      for (const el of document.querySelectorAll('span, div, b, strong, ins, h1, h2')) {
+        if (++scanned > 2500) break;
+        if (el.children.length > 2) continue;
+        const text = (el.textContent || '').trim();
+        if (!text || text.length > 25) continue;
+        const m = MONEY_RE.exec(text);
+        if (!m || parseNum(m[2]) !== price) continue;
+        if (el.closest('del, s, strike') || el.closest(CROSS_SELL)) continue;
+        if (!visible(el)) continue;
+        const size = parseFloat(getComputedStyle(el).fontSize) || 0;
+        if (size > bestSize) {
+          bestSize = size;
+          priceEl = el;
+        }
       }
-      if (!struckTag && !hint && !struckStyle) continue;
-      if (!visible(el)) continue;
-      const n = parseNum(m[2]);
-      if (n == null) continue;
-      if (price != null && (n <= price || n > price * 20)) continue;
-      if (best == null || n < best) best = n;
+    }
+
+    if (priceEl) {
+      let node = priceEl.parentElement;
+      for (let depth = 0; node && node !== document.body && depth < 7; depth++, node = node.parentElement) {
+        let best = null;
+        let scanned = 0;
+        for (const el of node.querySelectorAll(MRP_SEL)) {
+          if (++scanned > 300) break;
+          const n = mrpCandidate(el);
+          if (n != null && (best == null || n < best)) best = n;
+        }
+        if (best != null) return best;
+      }
+    }
+
+    let best = null;
+    let scanned = 0;
+    for (const el of document.querySelectorAll(MRP_SEL)) {
+      if (++scanned > 500) break;
+      const n = mrpCandidate(el);
+      if (n != null && (best == null || n < best)) best = n;
     }
     return best;
   }

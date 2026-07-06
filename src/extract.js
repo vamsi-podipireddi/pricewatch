@@ -368,20 +368,40 @@ function extractAmazon(html) {
   return { ok: true, price, currency: null, title, image, method: 'amazon' };
 }
 
-function amazonExtras(html, price) {
-  let mrp = null;
+export function amazonExtras(html, price) {
   const core =
-    /id=["']corePriceDisplay_desktop_feature_div["']([\s\S]{0,6000})/i.exec(html)?.[1] ??
-    /id=["']corePrice_feature_div["']([\s\S]{0,6000})/i.exec(html)?.[1] ??
+    /id=["']corePriceDisplay_desktop_feature_div["']([\s\S]{0,12000})/i.exec(html)?.[1] ??
+    /id=["']corePrice_feature_div["']([\s\S]{0,12000})/i.exec(html)?.[1] ??
     '';
-  // Strike-through list price: <span class="a-price a-text-price">…<span class="a-offscreen">₹2,999</span>
-  const strike = /a-text-price[^>]*>[\s\S]{0,120}?class=["']a-offscreen["'][^>]*>([^<]+)/i.exec(core);
-  if (strike) mrp = parsePrice(strike[1]);
-  mrp ??= parsePrice(/"basisPrice"[\s\S]{0,160}?"priceAmount"\s*:\s*([\d.]+)/.exec(html)?.[1]);
-  mrp ??= parsePrice(/M\.R\.P\.?[\s\S]{0,120}?(?:₹|&#8377;|Rs\.?\s?|\$|£|€)\s?([\d][\d,.]*)/i.exec(html)?.[1]);
+  // The true M.R.P. lives in the buy box's "basisPrice" row. A deal page adds
+  // a second strike ("Was: ₹1,999" — the recent price, not the MRP) that also
+  // carries a-text-price, so labeled candidates win and the generic strike
+  // fallback takes the LARGEST strike in the buy box, never the first/smallest.
+  let mrp =
+    parsePrice(/basisPrice[\s\S]{0,300}?class=["']a-offscreen["'][^>]*>([^<]+)/i.exec(core)?.[1]) ??
+    parsePrice(/M\.R\.P\.?[\s\S]{0,160}?(?:₹|&#8377;|Rs\.?\s?|\$|£|€)\s?([\d][\d,.]*)/i.exec(html)?.[1]) ??
+    parsePrice(/"basisPrice"[\s\S]{0,160}?"priceAmount"\s*:\s*([\d.]+)/.exec(html)?.[1]);
+  if (mrp == null && price != null) {
+    const strikes = [];
+    const strikeRe = /a-text-price[^>]*>[\s\S]{0,120}?class=["']a-offscreen["'][^>]*>([^<]+)/gi;
+    let s;
+    let n = 0;
+    while ((s = strikeRe.exec(core)) && ++n < 10) {
+      const v = parsePrice(s[1]);
+      if (v != null && v > price && v < price * 20) strikes.push(v);
+    }
+    if (strikes.length) mrp = Math.max(...strikes);
+  }
 
-  const rating = parseRating(/([\d.]+)\s+out of 5(?:\s+stars)?/i.exec(html)?.[1]);
-  const reviewCount = parseCount(/([\d,]+)\s+(?:global\s+)?ratings/i.exec(html)?.[1]);
+  // Rating / count scoped to the product's own review block first — the whole
+  // page also contains "x out of 5" snippets for carousel/related products.
+  const revBlock = /id=["']averageCustomerReviews["']([\s\S]{0,1500})/i.exec(html)?.[1] ?? '';
+  const rating =
+    parseRating(/([\d.]+)\s+out of\s+5/i.exec(revBlock)?.[1]) ??
+    parseRating(/([\d.]+)\s+out of 5(?:\s+stars)?/i.exec(html)?.[1]);
+  const reviewCount =
+    parseCount(/([\d,]+)\s*(?:global\s+)?ratings/i.exec(revBlock)?.[1]) ??
+    parseCount(/([\d,]+)\s+(?:global\s+)?ratings/i.exec(html)?.[1]);
   const model = cleanModel(
     /Item model number[\s\S]{0,240}?<(?:td|span)[^>]*>\s*(?:<[^>]+>\s*)*([^<]{2,80})</i.exec(html)?.[1] ?? null
   );

@@ -6,6 +6,7 @@
 //   POST   /api/products               -> add URL, or record a price observation
 //                                         for an existing URL (extension path)
 //   POST   /api/products/:id/refresh   -> scrape now
+//   POST   /api/products/bulk-delete   -> { ids: [...] } — delete many + their history
 //   PATCH  /api/products/:id           -> { title?, targetPrice?, archived?, groupId? }
 //   DELETE /api/products/:id
 //   POST   /api/groups                 -> { name?, productIds: [>=2] }
@@ -160,6 +161,19 @@ async function handleApi(request, env, url) {
   }
 
   if (method === 'POST' && seg.length === 2) return addOrObserve(env, await readBody(request));
+
+  if (method === 'POST' && seg[2] === 'bulk-delete' && seg.length === 3) {
+    const b = await readBody(request);
+    const ids = Array.isArray(b?.ids)
+      ? [...new Set(b.ids.filter((x) => typeof x === 'string'))].slice(0, 200)
+      : [];
+    if (!ids.length) return json({ error: 'ids is required (non-empty array of product ids)' }, 400);
+    const marks = ids.map(() => '?').join(',');
+    await env.DB.prepare(`DELETE FROM price_history WHERE product_id IN (${marks})`).bind(...ids).run();
+    const r = await env.DB.prepare(`DELETE FROM products WHERE id IN (${marks})`).bind(...ids).run();
+    await cleanupGroups(env);
+    return json({ ok: true, deleted: r.meta?.changes ?? 0 });
+  }
 
   const id = seg[2];
   if (!id) return json({ error: 'Not found' }, 404);

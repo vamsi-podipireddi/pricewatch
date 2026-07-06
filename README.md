@@ -105,8 +105,9 @@ npm run dev          # http://localhost:8787
 ```
 
 Trigger the cron locally: `curl "http://localhost:8787/cdn-cgi/handler/scheduled"`
-(wrangler dev exposes scheduled handlers there), or just use "Check all now"
-in the UI.
+(wrangler dev exposes scheduled handlers there), or just use "Sync prices"
+in the UI. The header's "Refresh" button only re-reads saved data (picks up
+extension clicks / cron results); "Sync prices" is the one that re-scrapes.
 
 ## API
 
@@ -120,6 +121,7 @@ All responses JSON; CORS open. Writes need `X-Auth-Token` when `API_TOKEN` is se
 | `POST /api/products/:id/refresh` | Scrape now |
 | `PATCH /api/products/:id` | `{title?, targetPrice?, archived?, groupId?}` (`groupId: null` leaves the group) |
 | `DELETE /api/products/:id` | Remove product + history |
+| `POST /api/products/bulk-delete` | `{ids: [...]}` — remove many products + their history in one call (UI: Select → Delete) |
 | `POST /api/groups` | `{name, productIds: [>=2]}` |
 | `PATCH /api/groups/:id` | `{name}` |
 | `DELETE /api/groups/:id` | Dissolve — members stay tracked, ungrouped |
@@ -141,12 +143,17 @@ extension and a pasted URL land on the same product.
 The extension adds a 5th, strongest path: the rendered DOM, with a
 biggest-visible-price heuristic that skips struck-through MRPs.
 
-Every path also collects extras where available: MRP (strike-through /
-`a-text-price` / Flipkart embedded state / Shopify `compare_at_price` — only
-kept when strictly above the price), rating + ratings count (JSON-LD
-`aggregateRating`, Amazon `#acrPopover`), and model number (JSON-LD `mpn`,
-Amazon "Item model number", Flipkart spec table). The extension additionally
-parses the delivery line into a date (`Tomorrow`, `Wednesday, 9 July`, …).
+Every path also collects extras where available: MRP (Amazon `basisPrice`
+"M.R.P." row first — a deal's "Was:" strike must not win — then labeled
+M.R.P. text, then buy-box strikes / Flipkart embedded state / Shopify
+`compare_at_price`; only kept when strictly above the price), rating +
+ratings count (JSON-LD `aggregateRating`, Amazon's own review block — never
+carousel snippets), and model number (JSON-LD `mpn`, Amazon "Item model
+number", Flipkart spec table). The extension's MRP scan is anchored to the
+price element's own block and ignores cross-sell rails (carousels, "similar
+items"), so a related product's strike price can't become this product's MRP.
+The extension additionally parses the delivery line into a date (`Tomorrow`,
+`Wednesday, 9 July`, …).
 
 ## Upgrading a v1 deployment to v2
 
@@ -169,7 +176,7 @@ Order matters — migrate the database **before** deploying the new Worker:
 - **Cron triggers** are a Workers feature (not Pages) — that's why this is a
   single Worker with static assets rather than a Pages project; same hosting,
   same free tier, and cron works.
-- "Check all now" in the UI fans out client-side, one request per product, so
+- "Sync prices" in the UI fans out client-side, one request per product, so
   it never hits the per-invocation subrequest cap.
 
 ## Layout

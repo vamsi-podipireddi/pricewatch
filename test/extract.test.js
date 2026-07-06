@@ -14,6 +14,7 @@ import {
   extractLdExtras,
   extractMeta,
   extractGenericMrp,
+  amazonExtras,
 } from '../src/extract.js';
 
 /* ---------- parsers ---------- */
@@ -153,4 +154,48 @@ test('extractGenericMrp rejects candidates at or below the price', () => {
   assert.equal(extractGenericMrp('<del>₹1,611</del>', 1611), null);
   assert.equal(extractGenericMrp('<del>₹900</del>', 1611), null);
   assert.equal(extractGenericMrp('<p>no strikes here</p>', 1611), null);
+});
+
+/* ---------- Amazon extras ---------- */
+
+// Deal layout: the buy box carries BOTH a "Was: ₹1,999" strike (deal reference
+// price, a-text-price) and the real "M.R.P.: ₹4,899" (basisPrice row). The
+// basisPrice value must win — first-strike-match used to return 1,999.
+const AMAZON_DEAL_PAGE = `
+<div class="carousel">Related item 3.8 out of 5 stars · 12,345 ratings <span class="a-text-price"><span class="a-offscreen">₹999</span></span></div>
+<div id="corePriceDisplay_desktop_feature_div">
+  <span class="a-price priceToPay"><span class="a-offscreen">₹1,611</span></span>
+  <span class="a-price a-text-price" data-a-strike="true"><span class="a-offscreen">₹1,999.00</span></span>
+  <span class="a-size-small basisPrice">M.R.P.: <span class="a-price a-text-price" data-a-strike="true"><span class="a-offscreen">₹4,899.00</span></span></span>
+</div>
+<div id="averageCustomerReviews">
+  <span id="acrPopover" title="4.1 out of 5 stars"></span>
+  <span id="acrCustomerReviewText">528 ratings</span>
+</div>`;
+
+test('amazonExtras prefers the basisPrice M.R.P. over a deal "Was" strike', () => {
+  const r = amazonExtras(AMAZON_DEAL_PAGE, 1611);
+  assert.equal(r.mrp, 4899);
+});
+
+test('amazonExtras scopes rating/reviews to the product review block, not carousels', () => {
+  const r = amazonExtras(AMAZON_DEAL_PAGE, 1611);
+  assert.equal(r.rating, 4.1);
+  assert.equal(r.reviewCount, 528);
+});
+
+test('amazonExtras falls back to the LARGEST buy-box strike when unlabeled', () => {
+  const html = `
+  <div id="corePriceDisplay_desktop_feature_div">
+    <span class="a-price"><span class="a-offscreen">₹1,611</span></span>
+    <span class="a-price a-text-price"><span class="a-offscreen">₹1,999</span></span>
+    <span class="a-price a-text-price"><span class="a-offscreen">₹4,899</span></span>
+  </div>`;
+  assert.equal(amazonExtras(html, 1611).mrp, 4899);
+});
+
+test('amazonExtras returns null MRP when nothing valid is in the buy box', () => {
+  const html = `<div id="corePriceDisplay_desktop_feature_div">
+    <span class="a-price"><span class="a-offscreen">₹1,611</span></span></div>`;
+  assert.equal(amazonExtras(html, 1611).mrp, null);
 });
