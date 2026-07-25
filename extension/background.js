@@ -69,6 +69,84 @@ function flash(text, color) {
   setTimeout(() => chrome.action.setBadgeText({ text: '' }), 4000);
 }
 
+/* ---------- auto-sync ----------
+The server cron can't reach bot-walled stores (Myntra 520s every datacenter
+IP), but a plain fetch from this browser — home IP, real Chrome TLS, the
+site's own cookies — returns the full page. An alarm re-checks the products
+the server marked blocked/error and posts whatever parse.js finds, so those
+stay fresh without manual toolbar clicks. Only cost: the browser must be
+running. */
+
+importScripts('parse.js');
+
+const SYNC_ALARM = 'pricewatch-autosync';
+const SYNC_DEFAULTS = { autosync: true, autosyncMins: 240 };
+const SYNC_MAX_PER_RUN = 15;
+
+async function ensureSyncAlarm() {
+  const cfg = await chrome.storage.sync.get(SYNC_DEFAULTS);
+  await chrome.alarms.clear(SYNC_ALARM);
+  if (!cfg.autosync) return;
+  chrome.alarms.create(SYNC_ALARM, {
+    delayInMinutes: 3, // near-term first run also covers "browser was closed all night"
+    periodInMinutes: Math.max(30, Number(cfg.autosyncMins) || SYNC_DEFAULTS.autosyncMins),
+  });
+}
+
+chrome.runtime.onInstalled.addListener(ensureSyncAlarm);
+chrome.runtime.onStartup.addListener(ensureSyncAlarm);
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'sync' && (changes.autosync || changes.autosyncMins)) ensureSyncAlarm();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === SYNC_ALARM) autoSync().catch(() => {});
+});
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function autoSync() {
+  const cfg = await chrome.storage.sync.get({ server: '', token: '', ...SYNC_DEFAULTS });
+  if (!cfg.server || !cfg.autosync) return;
+  const base = cfg.server.replace(/\/+$/, '');
+  const auth = cfg.token ? { 'x-auth-token': cfg.token } : {};
+
+  const res = await fetch(base + '/api/products', { headers: auth });
+  if (!res.ok) return;
+  const { products = [] } = await res.json();
+  const targets = products
+    .filter((p) => p.lastStatus === 'blocked' || p.lastStatus === 'error')
+    .slice(0, SYNC_MAX_PER_RUN);
+
+  for (const p of targets) {
+    try {
+      const page = await fetch(p.url, {
+        credentials: 'include',
+        headers: { Accept: 'text/html,application/xhtml+xml' },
+      });
+      if (page.ok) {
+        const parsed = parseProductHtml(await page.text());
+        if (parsed.price != null) {
+          await fetch(base + '/api/products', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...auth },
+            body: JSON.stringify({
+              url: p.url,
+              price: parsed.price,
+              mrp: parsed.mrp ?? undefined,
+              currency: parsed.currency ?? undefined,
+              source: 'extension',
+            }),
+          });
+        }
+      }
+    } catch {
+      // One store failing must not stop the rest of the batch.
+    }
+    await sleep(3000 + Math.random() * 2000); // gentle pacing, not a crawl burst
+  }
+}
+
 // Injected into the page. Must be fully self-contained (no closures).
 // Extraction order: JSON-LD -> meta tags -> site selectors -> generic
 // "biggest visible price-looking element" heuristic. Then the extras pass:

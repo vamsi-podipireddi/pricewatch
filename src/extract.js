@@ -463,7 +463,9 @@ export async function extract(url, { currency } = {}) {
     if (shopify) return finalize(shopify, null, host);
 
     const { status, text } = await fetchPage(url, { cookie });
-    if (status === 403 || status === 429 || status === 503) {
+    // 403/429/503 are explicit refusals; 52x are Cloudflare edge errors that in
+    // practice mean the store's bot protection dropped the connection (Myntra).
+    if (status === 403 || status === 429 || status === 503 || (status >= 520 && status <= 530)) {
       return { ok: false, blocked: true, error: `Store refused the request (HTTP ${status}).` };
     }
     if (status >= 400) return { ok: false, error: `HTTP ${status}` };

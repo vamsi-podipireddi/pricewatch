@@ -5,14 +5,18 @@ const status = (msg, cls = '') => {
   $('status').className = cls;
 };
 
-chrome.storage.sync.get({ server: '', token: '' }).then((cfg) => {
+chrome.storage.sync.get({ server: '', token: '', autosync: true, autosyncMins: 240 }).then((cfg) => {
   $('server').value = cfg.server;
   $('token').value = cfg.token;
+  $('autosync').checked = Boolean(cfg.autosync);
+  $('autosyncMins').value = String(cfg.autosyncMins);
 });
 
 const readForm = () => ({
   server: $('server').value.trim().replace(/\/+$/, ''),
   token: $('token').value.trim(),
+  autosync: $('autosync').checked,
+  autosyncMins: Number($('autosyncMins').value) || 240,
 });
 
 $('save').addEventListener('click', async () => {

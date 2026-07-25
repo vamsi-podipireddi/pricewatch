@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PriceWatch",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "One click on any product page adds it to your PriceWatch tracker — price, MRP, rating and delivery estimate included.",
   "action": {
     "default_title": "Track this product in PriceWatch"
@@ -13,5 +13,6 @@
     "page": "options.html",
     "open_in_tab": true
   },
-  "permissions": ["activeTab", "scripting", "storage"]
+  "permissions": ["activeTab", "scripting", "storage", "alarms"],
+  "host_permissions": ["http://*/*", "https://*/*"]
 }

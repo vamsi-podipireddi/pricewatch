@@ -39,6 +39,13 @@
     border-radius: 6px; background: var(--page); color: var(--ink);
   }
   input::placeholder { color: var(--muted); }
+  select {
+    font: inherit; padding: 8px 11px; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--page); color: var(--ink);
+  }
+  label.check { display: flex; gap: 10px; align-items: flex-start; }
+  label.check input { width: 15px; height: 15px; margin-top: 2px; accent-color: var(--accent); flex: none; }
+  label.check .hint { display: block; margin-top: 2px; }
   .row { display: flex; gap: 8px; justify-content: flex-end; }
   button {
     font: inherit; display: inline-flex; align-items: center; gap: 7px;
@@ -72,6 +79,21 @@
     <input id="token" type="password" placeholder="Value of the API_TOKEN Worker secret" autocomplete="off">
   </label>
   <p class="hint">After saving, just click the PriceWatch toolbar icon on any product page. Pin the icon for one-click access.</p>
+
+  <label class="check">
+    <input id="autosync" type="checkbox">
+    <span>Auto-sync bot-walled products from this browser
+      <span class="hint">Stores that refuse server checks (e.g. Myntra) are re-checked here on a timer,
+      using your home IP and cookies. Works whenever the browser is running.</span></span>
+  </label>
+  <label>Auto-sync interval
+    <select id="autosyncMins">
+      <option value="120">Every 2 hours</option>
+      <option value="240">Every 4 hours</option>
+      <option value="480">Every 8 hours</option>
+      <option value="1440">Once a day</option>
+    </select>
+  </label>
 
   <div class="row">
     <button id="test" type="button">Test connection</button>
