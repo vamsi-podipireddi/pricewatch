@@ -343,6 +343,16 @@ async function observe(env, product, r, source) {
   )
     .bind(product.id)
     .first();
+  // A server-side check that comes back in a different currency (geo-priced
+  // store ignoring the currency cookie) must not mix e.g. USD numbers into an
+  // INR history. The extension scrapes what the user actually sees, so its
+  // observations are exempt and may legitimately move the product's currency.
+  if (last && source !== 'extension' && r.currency && product.currency && r.currency !== product.currency) {
+    await env.DB.prepare('UPDATE products SET last_checked = ?, last_status = ?, last_error = ? WHERE id = ?')
+      .bind(now, 'error', `Store returned ${r.currency} but product is tracked in ${product.currency}; price skipped.`, product.id)
+      .run();
+    return;
+  }
   const changed = !last || Math.abs(last.price - r.price) > 0.009;
   const heartbeat = last && Date.now() - Date.parse(last.at) > 20 * 3600 * 1000;
   if (changed || heartbeat) {
@@ -391,7 +401,7 @@ async function saveDelivery(env, productId, d) {
 }
 
 async function checkProduct(env, product, source = 'cron') {
-  const r = await extract(product.url);
+  const r = await extract(product.url, { currency: product.currency });
   if (r.ok) {
     await observe(env, product, r, source);
     return r;

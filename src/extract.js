@@ -21,12 +21,15 @@ const HEADERS = {
 // pages carry price markup early; cap what we scan.
 const MAX_HTML = 900_000;
 
-async function fetchPage(url, { accept } = {}) {
+async function fetchPage(url, { accept, cookie } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
+    const headers = { ...HEADERS };
+    if (accept) headers.Accept = accept;
+    if (cookie) headers.Cookie = cookie;
     const res = await fetch(url, {
-      headers: accept ? { ...HEADERS, Accept: accept } : HEADERS,
+      headers,
       redirect: 'follow',
       signal: controller.signal,
     });
@@ -437,7 +440,7 @@ function flipkartExtras(html, price) {
 
 /* ---------- dispatch ---------- */
 
-export async function extract(url) {
+export async function extract(url, { currency } = {}) {
   let host;
   try {
     host = new URL(url).hostname;
@@ -445,11 +448,21 @@ export async function extract(url) {
     return { ok: false, error: 'Invalid URL' };
   }
 
+  // Geo-priced stores (kentfaith.com and other OpenCart-style shops) pick the
+  // display currency from the visitor's IP — a Worker fetch egresses far from
+  // the user and gets the wrong one. Their currency switcher persists as a
+  // plain `currency=XXX` cookie, so sending it pins the page to the currency
+  // the product is already tracked in. Stores that don't use it ignore it.
+  const cookie =
+    typeof currency === 'string' && /^[A-Za-z]{3}$/.test(currency.trim())
+      ? `currency=${currency.trim().toUpperCase()}`
+      : undefined;
+
   try {
     const shopify = await tryShopify(url);
     if (shopify) return finalize(shopify, null, host);
 
-    const { status, text } = await fetchPage(url);
+    const { status, text } = await fetchPage(url, { cookie });
     if (status === 403 || status === 429 || status === 503) {
       return { ok: false, blocked: true, error: `Store refused the request (HTTP ${status}).` };
     }
