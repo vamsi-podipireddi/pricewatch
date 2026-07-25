@@ -302,6 +302,22 @@ main {
 
 .chev { color: var(--muted); width: 14px; height: 14px; transition: transform 0.12s ease, color 0.12s ease; }
 
+/* ---------- category section rows ---------- */
+
+tr.cat-head td {
+  padding: 12px 18px 6px;
+  background: color-mix(in srgb, var(--ink) 2%, transparent);
+  border-bottom: 1px solid var(--hairline);
+}
+.cat-name {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.cat-count { font-size: 11px; color: var(--muted); margin-left: 8px; font-variant-numeric: tabular-nums; }
+
 /* ---------- group rows ---------- */
 
 tr.group-head td {
@@ -600,4 +616,29 @@ dialog input::placeholder { color: var(--muted); }
   .sub-meta .hide-sm { display: none; }
   .topbar { padding-top: 20px; }
   .tiles { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ---------- split view: list left, detail right ---------- */
+/* Wide screens put the detail panel beside the list (sticky, own scrollbar)
+   so selecting a product never requires scrolling down to see it. */
+
+@media (min-width: 1280px) {
+  .topbar, main, .foot { max-width: 1680px; }
+  main {
+    grid-template-columns: minmax(0, 1fr) minmax(400px, 460px);
+    align-items: start;
+  }
+  #detail-section {
+    position: sticky;
+    top: 16px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  #detail-section .tiles { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Mid-range split: the list column is narrow, drop the status column. */
+@media (min-width: 1280px) and (max-width: 1560px) {
+  .watch-table .col-check { display: none; }
 }

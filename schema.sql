@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS products (
   model            TEXT,                   -- manufacturer model number / MPN when detectable
   canonical_key    TEXT,                   -- store-stable product id, e.g. "amazon.in:B0ABC12345" — dedupes re-adds
   group_id         TEXT,                   -- manual cross-store grouping (groups.id)
+  category         TEXT,                   -- user-assigned shelf ("Shoes", "Camera gear"); NULL = uncategorized
   delivery_text    TEXT,                   -- raw "FREE delivery Wednesday, 9 July" line, captured by the extension
   delivery_date    TEXT,                   -- parsed YYYY-MM-DD when the text was parseable
   delivery_pincode TEXT,                   -- pincode the page was showing when captured

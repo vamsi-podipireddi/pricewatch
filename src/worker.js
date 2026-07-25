@@ -106,6 +106,7 @@ function rowToApi(r, points = []) {
     model: r.model,
     canonicalKey: r.canonical_key,
     groupId: r.group_id,
+    category: r.category ?? null,
     deliveryText: r.delivery_text,
     deliveryDate: r.delivery_date,
     deliveryPincode: r.delivery_pincode,
@@ -200,6 +201,13 @@ async function handleApi(request, env, url) {
     if (typeof b.archived === 'boolean') {
       sets.push('archived = ?');
       binds.push(b.archived ? 1 : 0);
+    }
+    if ('category' in b) {
+      const cat = cleanText(b.category, 40);
+      if (b.category === null || b.category === '' || cat) {
+        sets.push('category = ?');
+        binds.push(cat);
+      }
     }
     if ('groupId' in b) {
       if (b.groupId === null) {
@@ -316,9 +324,9 @@ async function addOrObserve(env, b) {
   const now = new Date().toISOString();
   const domain = new URL(norm).hostname.replace(/^www\./, '');
   await env.DB.prepare(
-    'INSERT INTO products (id, url, domain, title, image, currency, canonical_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO products (id, url, domain, title, image, currency, canonical_key, category, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   )
-    .bind(id, norm, domain, observation.title, observation.image, observation.currency ?? 'INR', ck, now)
+    .bind(id, norm, domain, observation.title, observation.image, observation.currency ?? 'INR', ck, cleanText(b.category, 40), now)
     .run();
   const product = await env.DB.prepare('SELECT * FROM products WHERE id = ?').bind(id).first();
 

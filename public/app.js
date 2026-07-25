@@ -162,6 +162,34 @@ function deliveryInfo(p) {
 
 const groupsById = () => new Map((state.data.groups || []).map((g) => [g.id, g]));
 
+/* ---------- categories ---------- */
+
+const UNCAT = 'Uncategorized';
+
+const catOf = (p) => (typeof p.category === 'string' && p.category.trim()) || null;
+
+const allCategories = () =>
+  [...new Set(state.data.products.map(catOf).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+// Buckets view entries by category, preserving their order inside each bucket.
+// A group entry sits under its first member's category. Case-insensitive merge,
+// first-seen spelling wins. Uncategorized always sorts last.
+function categorySections(entries) {
+  const byKey = new Map(); // lower-case key -> { name, list }
+  for (const e of entries) {
+    const p = e.type === 'single' ? e.p : e.members[0];
+    const name = catOf(p) || UNCAT;
+    const key = name.toLowerCase();
+    if (!byKey.has(key)) byKey.set(key, { name, list: [] });
+    byKey.get(key).list.push(e);
+  }
+  return [...byKey.values()].sort((a, b) => {
+    if (a.name === UNCAT) return 1;
+    if (b.name === UNCAT) return -1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
 // Entries the watch table renders: groups (>=2 members) and ungrouped singles,
 // newest first. Members are sorted cheapest first.
 function viewEntries() {
@@ -506,18 +534,27 @@ function renderWatch() {
 
   const colCount = state.selectMode ? 7 : 6;
   const entries = viewEntries();
-  const body = entries
-    .map((e) => {
-      if (e.type === 'single') return rowHTML(e.p);
-      const priced = e.members.filter((p) => currentPrice(p) != null);
-      const sameCur = new Set(priced.map((p) => p.currency)).size <= 1;
-      const bestId = sameCur && priced.length > 1 ? priced[0].id : null;
-      return (
-        groupHeadHTML(e.g, e.members, colCount) +
-        e.members.map((p) => rowHTML(p, { inGroup: true, best: p.id === bestId })).join('')
-      );
-    })
-    .join('');
+  const entryHTML = (e) => {
+    if (e.type === 'single') return rowHTML(e.p);
+    const priced = e.members.filter((p) => currentPrice(p) != null);
+    const sameCur = new Set(priced.map((p) => p.currency)).size <= 1;
+    const bestId = sameCur && priced.length > 1 ? priced[0].id : null;
+    return (
+      groupHeadHTML(e.g, e.members, colCount) +
+      e.members.map((p) => rowHTML(p, { inGroup: true, best: p.id === bestId })).join('')
+    );
+  };
+  // Category sections only appear once something is categorized — a fresh
+  // install keeps the familiar flat list.
+  const body = products.some(catOf)
+    ? categorySections(entries)
+        .map(
+          (sec) =>
+            `<tr class="cat-head"><td colspan="${colCount}"><span class="cat-name">${esc(sec.name)}</span><span class="cat-count">${sec.list.length}</span></td></tr>` +
+            sec.list.map(entryHTML).join('')
+        )
+        .join('')
+    : entries.map(entryHTML).join('');
 
   root.innerHTML = `<div class="card">
     <div class="card-head">
@@ -649,6 +686,7 @@ function renderSelectBar() {
     <button class="btn btn-sm btn-ghost" data-bar="all">${n === total ? 'Clear all' : 'Select all'}</button>
     <button class="btn btn-sm" data-bar="compare" ${n === 2 ? '' : 'disabled'}>${icon('compare')}<span>Compare</span></button>
     <button class="btn btn-sm" data-bar="group" ${n >= 2 ? '' : 'disabled'}>${icon('layers')}<span>Group</span></button>
+    <button class="btn btn-sm" data-bar="category" ${n ? '' : 'disabled'}>${icon('tag')}<span>Category</span></button>
     <button class="btn btn-sm btn-danger" data-bar="delete" ${n ? '' : 'disabled'}>${icon('trash')}<span>Delete</span></button>
     <button class="btn btn-sm btn-ghost" data-bar="cancel">Cancel</button>`;
 
@@ -689,6 +727,25 @@ function renderSelectBar() {
     state.selected.clear();
     render();
     $('#detail-section').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+  $('[data-bar="category"]', bar).addEventListener('click', async () => {
+    const ids = [...state.selected];
+    if (!ids.length) return;
+    const cats = allCategories();
+    const first = state.data.products.find((p) => p.id === ids[0]);
+    const c = prompt(
+      `Category for ${ids.length} ${ids.length === 1 ? 'product' : 'products'} (leave blank to remove)` +
+        (cats.length ? `\nExisting: ${cats.join(', ')}` : ''),
+      (first && catOf(first)) || ''
+    );
+    if (c == null) return;
+    try {
+      for (const id of ids) await api(`/api/products/${id}`, 'PATCH', { category: c.trim() || null });
+      state.selectMode = false;
+      state.selected.clear();
+      toast(c.trim() ? `Moved ${ids.length} to "${c.trim()}".` : 'Category cleared.');
+      await loadState();
+    } catch (err) { toast(err.message); }
   });
   $('[data-bar="group"]', bar).addEventListener('click', async () => {
     const ids = [...state.selected];
@@ -1123,6 +1180,7 @@ function renderDetail() {
             ${p.model ? `<span>·</span><span title="Model number">${esc(p.model)}</span>` : ''}
             <span>·</span>
             ${statusLineHTML(p)}
+            ${catOf(p) ? `<span class="group-chip" title="Category">${icon('tag')}${esc(catOf(p))}</span>` : ''}
             ${gname ? `<span class="group-chip" title="In group">${icon('layers')}${esc(gname)}
               <button type="button" data-act="leave-group" title="Remove from group" aria-label="Remove from group">${icon('x')}</button></span>` : ''}
           </div>
@@ -1130,6 +1188,7 @@ function renderDetail() {
       </div>
       <div class="detail-actions">
         <button class="btn btn-icon" data-act="rename" title="Rename" aria-label="Rename product">${icon('pencil')}</button>
+        <button class="btn btn-icon" data-act="category" title="Set category" aria-label="Set category">${icon('tag')}</button>
         <button class="btn btn-icon" data-act="refresh" title="Check price now" aria-label="Check price now">${icon('refresh')}</button>
         <a class="btn btn-icon" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer" title="Open product page" aria-label="Open product page">${icon('external')}</a>
         <button class="btn btn-icon" data-act="delete" title="Stop tracking" aria-label="Stop tracking">${icon('trash')}</button>
@@ -1154,6 +1213,19 @@ function renderDetail() {
     if (!name || !name.trim()) return;
     try {
       await api(`/api/products/${p.id}`, 'PATCH', { title: name.trim() });
+      await loadState();
+    } catch (err) { toast(err.message); }
+  });
+
+  $('[data-act="category"]', root).addEventListener('click', async () => {
+    const cats = allCategories();
+    const c = prompt(
+      `Category (leave blank to remove)${cats.length ? `\nExisting: ${cats.join(', ')}` : ''}`,
+      catOf(p) || ''
+    );
+    if (c == null) return;
+    try {
+      await api(`/api/products/${p.id}`, 'PATCH', { category: c.trim() || null });
       await loadState();
     } catch (err) { toast(err.message); }
   });
@@ -1239,7 +1311,12 @@ $('#btn-refresh').addEventListener('click', async (e) => {
   }
 });
 
-$('#btn-add').addEventListener('click', () => $('#dlg-add').showModal());
+function fillCatList() {
+  const dl = $('#cat-list');
+  if (dl) dl.innerHTML = allCategories().map((c) => `<option value="${esc(c)}">`).join('');
+}
+
+$('#btn-add').addEventListener('click', () => { fillCatList(); $('#dlg-add').showModal(); });
 $('#btn-settings').addEventListener('click', () => {
   $('#form-settings [name="token"]').value = token();
   $('#dlg-settings').showModal();
@@ -1265,10 +1342,11 @@ $('#form-add').addEventListener('submit', async (e) => {
   const fd = new FormData(e.target);
   const url = String(fd.get('url') || '').trim();
   const title = String(fd.get('title') || '').trim();
+  const category = String(fd.get('category') || '').trim();
   const btn = e.target.querySelector('[type="submit"]');
   btn.disabled = true;
   try {
-    const r = await api('/api/products', 'POST', { url, title: title || undefined });
+    const r = await api('/api/products', 'POST', { url, title: title || undefined, category: category || undefined });
     $('#dlg-add').close();
     e.target.reset();
     state.sel = r.product.id;

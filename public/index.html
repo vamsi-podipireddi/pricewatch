@@ -131,6 +131,10 @@
     <label>Name <span class="opt">(optional — auto-detected)</span>
       <input name="title" placeholder="Leave blank to use the page title" autocomplete="off">
     </label>
+    <label>Category <span class="opt">(optional)</span>
+      <input name="category" list="cat-list" placeholder="e.g. Shoes, Camera gear" autocomplete="off" maxlength="40">
+    </label>
+    <datalist id="cat-list"></datalist>
     <p class="dlg-note">Tip: adding via the browser extension also captures MRP, rating and the
       delivery estimate for your pincode — things server checks can't always see.</p>
     <div class="dlg-actions">
