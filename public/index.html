@@ -6,6 +6,8 @@
 <meta name="color-scheme" content="light dark">
 <title>PriceWatch</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23eb6834' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z'/%3E%3Ccircle cx='7.5' cy='7.5' r='.5' fill='%23eb6834'/%3E%3C/svg%3E">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#eb6834">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -81,6 +83,19 @@
     <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M20 6 9 17l-5-5"/>
     </symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
+      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
+    </symbol>
+    <symbol id="i-target" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>
+    </symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>
+    </symbol>
+    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -102,6 +117,9 @@
     <button id="btn-add" class="btn btn-primary" type="button">
       <svg class="icon"><use href="#i-plus"/></svg><span>Track a product</span>
     </button>
+    <button id="btn-alerts" class="btn btn-icon" type="button" title="Alerts" aria-label="Alerts">
+      <svg class="icon"><use href="#i-bell"/></svg><span id="alert-dot" class="alert-dot" hidden></span>
+    </button>
     <button id="btn-settings" class="btn btn-icon" type="button" title="Settings" aria-label="Settings">
       <svg class="icon"><use href="#i-gear"/></svg>
     </button>
@@ -115,6 +133,7 @@
 
 <footer class="foot">
   <p id="foot-line">Prices sync automatically on a Cloudflare cron. Click the PriceWatch extension on any product page to start tracking it.</p>
+  <p id="health-line" class="health-line"></p>
 </footer>
 
 <dialog id="dlg-add">
@@ -163,6 +182,53 @@
       <button type="submit" class="btn btn-primary">Save</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="dlg-input">
+  <form id="form-input" method="dialog">
+    <div class="dlg-head">
+      <h2 id="input-title">Edit</h2>
+      <button type="button" class="btn btn-icon" data-close aria-label="Close">
+        <svg class="icon"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <label><span id="input-label">Value</span>
+      <input name="value" id="input-value" autocomplete="off" list="input-list">
+    </label>
+    <datalist id="input-list"></datalist>
+    <p class="dlg-note" id="input-hint" hidden></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn btn-primary" id="input-submit">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-confirm">
+  <form id="form-confirm" method="dialog">
+    <div class="dlg-head">
+      <h2 id="confirm-title">Are you sure?</h2>
+      <button type="button" class="btn btn-icon" data-close aria-label="Close">
+        <svg class="icon"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <p class="dlg-note confirm-message" id="confirm-message"></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="submit" class="btn" id="confirm-submit">Confirm</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-alerts" class="dlg-wide">
+  <div class="dlg-head">
+    <h2>Alerts</h2>
+    <button type="button" class="btn btn-icon" data-close aria-label="Close">
+      <svg class="icon"><use href="#i-x"/></svg>
+    </button>
+  </div>
+  <div id="alerts-list" class="alerts-list"></div>
+  <p class="dlg-note" id="alerts-note"></p>
 </dialog>
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>

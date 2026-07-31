@@ -1,0 +1,16 @@
+# Config for vitest-pool-workers ONLY (npm run test:worker). Mirrors
+# wrangler.toml minus [assets]/[triggers] (not needed to exercise the API) —
+# the D1 binding here is an isolated in-test database, never your real one.
+
+name = "pricewatch-test"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pricewatch-test"
+database_id = "pricewatch-test"
+
+[vars]
+SWEEP_BATCH = "6"
+ALERT_DROP_PCT = "10"

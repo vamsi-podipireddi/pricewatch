@@ -8,6 +8,7 @@ import {
   parseRating,
   parseCount,
   validMrp,
+  parseAvailability,
   normalizeUrl,
   canonicalKey,
   extractJsonLd,
@@ -52,6 +53,17 @@ test('validMrp only accepts MRP strictly above price and within sanity bounds', 
   assert.equal(validMrp(1000, 1711), null); // below price -> misparse
   assert.equal(validMrp(999999, 10), null); // absurd multiple -> misparse
   assert.equal(validMrp(null, 1711), null);
+});
+
+test('parseAvailability maps schema.org URIs and enums to two states', () => {
+  assert.equal(parseAvailability('https://schema.org/InStock'), 'InStock');
+  assert.equal(parseAvailability('http://schema.org/OutOfStock'), 'OutOfStock');
+  assert.equal(parseAvailability('InStock'), 'InStock');
+  assert.equal(parseAvailability('SoldOut'), 'OutOfStock');
+  assert.equal(parseAvailability('Discontinued'), 'OutOfStock');
+  assert.equal(parseAvailability('LimitedAvailability'), 'InStock');
+  assert.equal(parseAvailability('PreOrder'), null); // not yet purchasable, not out of stock
+  assert.equal(parseAvailability(undefined), null);
 });
 
 /* ---------- URL normalization + canonical identity ---------- */
@@ -120,6 +132,15 @@ test('extractJsonLd returns price, rating, review count and model', () => {
   assert.equal(r.rating, 4.4);
   assert.equal(r.reviewCount, 312);
   assert.equal(r.model, 'A047SF');
+});
+
+test('extractJsonLd captures offer availability', () => {
+  const html = `<script type="application/ld+json">
+    {"@type":"Product","name":"X","offers":{"@type":"Offer","price":"999",
+     "priceCurrency":"INR","availability":"https://schema.org/OutOfStock"}}
+  </script>`;
+  assert.equal(extractJsonLd(html).availability, 'OutOfStock');
+  assert.equal(extractJsonLd(JSONLD_PAGE).availability, null); // no availability field -> unknown
 });
 
 test('extractLdExtras finds aggregateRating without offers, and via raw fragment', () => {

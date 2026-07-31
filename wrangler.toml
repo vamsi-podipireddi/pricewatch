@@ -23,6 +23,15 @@ crons = ["11 */2 * * *"]
 # Products checked per cron run. Kept small to stay inside the free-tier
 # 10 ms CPU budget (regex over large HTML costs CPU).
 SWEEP_BATCH = "6"
+# Minimum 24h fall to raise a "drop" alert, in percent.
+ALERT_DROP_PCT = "10"
+# Secrets (npx wrangler secret put <NAME>), all optional:
+#   API_TOKEN            protects writes
+#   READ_TOKEN           set to also require a token on reads (public otherwise)
+#   GMAIL_CLIENT_ID      \
+#   GMAIL_CLIENT_SECRET   } email price alerts from your own Gmail account
+#   GMAIL_REFRESH_TOKEN  /  (README -> "Price alerts" for the one-time setup)
+#   ALERT_EMAIL_TO       inbox that receives the alerts
 
 [observability]
 enabled = true

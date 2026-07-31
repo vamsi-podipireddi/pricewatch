@@ -1,22 +1,34 @@
 // PriceWatch Worker: API + static site + scheduled price sweep.
 //
 // Routes (JSON, CORS-open so the Chrome extension can call from anywhere):
-//   GET    /api/health                 -> { ok, authRequired, authOk }
+//   GET    /api/health                 -> { ok, authRequired, readAuthRequired, authOk }
 //   GET    /api/products               -> { products: [...], groups: [...], meta }
+//                                         ?archived=1 lists archived products instead
+//   GET    /api/products/:id           -> single product with FULL history (list
+//                                         responses window points to ~90d)
+//   GET    /api/products/lookup?url=   -> match by normalized URL / canonical key
+//                                         (extension popup: "is this page tracked?")
+//   GET    /api/alerts                 -> recent alerts feed (target/low/drop/restock)
 //   POST   /api/products               -> add URL, or record a price observation
-//                                         for an existing URL (extension path)
+//                                         for an existing URL (extension path);
+//                                         observeOnly:true never creates products
 //   POST   /api/products/:id/refresh   -> scrape now
 //   POST   /api/products/bulk-delete   -> { ids: [...] } — delete many + their history
-//   PATCH  /api/products/:id           -> { title?, targetPrice?, archived?, groupId? }
+//   PATCH  /api/products/:id           -> { title?, targetPrice?, archived?, groupId?, category? }
 //   DELETE /api/products/:id
 //   POST   /api/groups                 -> { name?, productIds: [>=2] }
 //   PATCH  /api/groups/:id             -> { name }
 //   DELETE /api/groups/:id             -> dissolve (members kept, ungrouped)
 //
 // Writes require the X-Auth-Token header when the API_TOKEN secret is set
-// (npx wrangler secret put API_TOKEN). Reads stay open.
+// (npx wrangler secret put API_TOKEN). Reads stay open unless the optional
+// READ_TOKEN secret is set (then reads accept READ_TOKEN or API_TOKEN).
+// Price alerts (see alerts.js) are emailed via the Gmail API when the
+// GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN /
+// ALERT_EMAIL_TO secrets are set; the alerts table feeds the UI regardless.
 
 import { extract, normalizeUrl, canonicalKey } from './extract.js';
+import { evaluateAlerts, emailConfigured } from './alerts.js';
 
 const CORS = {
   'access-control-allow-origin': '*',
@@ -52,8 +64,20 @@ export default {
 
 /* ---------- auth / helpers ---------- */
 
+const DAY = 86400_000;
+
 const authorized = (request, env) =>
   !env.API_TOKEN || request.headers.get('x-auth-token') === env.API_TOKEN;
+
+// Reads are open by default. Setting the READ_TOKEN secret closes them; the
+// write token is always accepted for reads too.
+const readAuthorized = (request, env) => {
+  if (!env.READ_TOKEN) return true;
+  const t = request.headers.get('x-auth-token');
+  return t === env.READ_TOKEN || (Boolean(env.API_TOKEN) && t === env.API_TOKEN);
+};
+
+const cleanAvailability = (v) => (v === 'InStock' || v === 'OutOfStock' ? v : null);
 
 const readBody = (request) => request.json().catch(() => null);
 
@@ -107,6 +131,8 @@ function rowToApi(r, points = []) {
     canonicalKey: r.canonical_key,
     groupId: r.group_id,
     category: r.category ?? null,
+    availability: r.availability ?? null,
+    archived: Boolean(r.archived),
     deliveryText: r.delivery_text,
     deliveryDate: r.delivery_date,
     deliveryPincode: r.delivery_pincode,
@@ -126,8 +152,19 @@ async function handleApi(request, env, url) {
   const method = request.method;
 
   if (seg[1] === 'health') {
-    return json({ ok: true, authRequired: Boolean(env.API_TOKEN), authOk: authorized(request, env) });
+    return json({
+      ok: true,
+      authRequired: Boolean(env.API_TOKEN),
+      readAuthRequired: Boolean(env.READ_TOKEN),
+      authOk: authorized(request, env),
+    });
   }
+
+  if (method === 'GET' && !readAuthorized(request, env)) {
+    return json({ error: 'Unauthorized: this deployment requires a token for reads too.' }, 401);
+  }
+
+  if (seg[1] === 'alerts' && method === 'GET' && seg.length === 2) return listAlerts(env);
 
   if (seg[1] === 'groups') {
     if (!authorized(request, env)) {
@@ -154,7 +191,14 @@ async function handleApi(request, env, url) {
 
   if (seg[1] !== 'products') return json({ error: 'Not found' }, 404);
 
-  if (method === 'GET' && seg.length === 2) return listProducts(env);
+  if (method === 'GET' && seg.length === 2) return listProducts(env, url);
+
+  if (method === 'GET' && seg[2] === 'lookup' && seg.length === 3) return lookupProduct(env, url);
+
+  if (method === 'GET' && seg.length === 3) {
+    const product = await getProduct(env, seg[2]);
+    return product ? json({ product }) : json({ error: 'Product not found' }, 404);
+  }
 
   // Everything past this point mutates.
   if (!authorized(request, env)) {
@@ -197,6 +241,7 @@ async function handleApi(request, env, url) {
     if (b.targetPrice === null || cleanPrice(b.targetPrice) != null) {
       sets.push('target_price = ?');
       binds.push(b.targetPrice);
+      sets.push('alerted_below_target = 0'); // new target re-arms the alert
     }
     if (typeof b.archived === 'boolean') {
       sets.push('archived = ?');
@@ -237,9 +282,17 @@ async function handleApi(request, env, url) {
 
 /* ---------- reads ---------- */
 
-async function listProducts(env) {
+const POINTS_WINDOW_DAYS = 90;
+
+// List responses window history to the last 90 days plus one anchor row per
+// product from before the window (so a price that hasn't changed in months
+// still draws as a line, not an empty chart). Full history: GET /:id.
+async function listProducts(env, url) {
+  const archived = url?.searchParams?.get('archived') === '1' ? 1 : 0;
   const prods = (
-    await env.DB.prepare('SELECT * FROM products WHERE archived = 0 ORDER BY created_at DESC').all()
+    await env.DB.prepare('SELECT * FROM products WHERE archived = ? ORDER BY created_at DESC')
+      .bind(archived)
+      .all()
   ).results;
   const groups = (await env.DB.prepare('SELECT id, name, created_at FROM groups').all()).results.map((g) => ({
     id: g.id,
@@ -248,16 +301,80 @@ async function listProducts(env) {
   }));
   const byId = new Map(prods.map((p) => [p.id, []]));
   if (prods.length) {
+    const cutoff = new Date(Date.now() - POINTS_WINDOW_DAYS * DAY).toISOString();
+    const anchors = (
+      await env.DB.prepare(
+        'SELECT product_id, price, mrp, MAX(at) AS at FROM price_history WHERE at < ? GROUP BY product_id'
+      ).bind(cutoff).all()
+    ).results;
+    for (const h of anchors) byId.get(h.product_id)?.push({ t: h.at, p: h.price, ...(h.mrp != null ? { m: h.mrp } : {}) });
     const hist = (
-      await env.DB.prepare('SELECT product_id, price, mrp, at FROM price_history ORDER BY at ASC LIMIT 20000').all()
+      await env.DB.prepare(
+        'SELECT product_id, price, mrp, at FROM price_history WHERE at >= ? ORDER BY at ASC LIMIT 20000'
+      ).bind(cutoff).all()
     ).results;
     for (const h of hist) byId.get(h.product_id)?.push({ t: h.at, p: h.price, ...(h.mrp != null ? { m: h.mrp } : {}) });
   }
   return json({
     products: prods.map((p) => rowToApi(p, byId.get(p.id))),
     groups,
-    meta: { authRequired: Boolean(env.API_TOKEN), sweepBatch: batchSize(env), sweepEveryHours: 2 },
+    meta: {
+      authRequired: Boolean(env.API_TOKEN),
+      readAuthRequired: Boolean(env.READ_TOKEN),
+      sweepBatch: batchSize(env),
+      sweepEveryHours: 2,
+      pointsWindowDays: POINTS_WINDOW_DAYS,
+      email: emailConfigured(env),
+    },
   });
+}
+
+async function listAlerts(env) {
+  const rows = (
+    await env.DB.prepare(
+      `SELECT a.id, a.product_id, a.type, a.price, a.prev_price, a.message, a.at, a.delivered,
+              p.title, p.url, p.domain, p.image, p.currency
+         FROM alerts a LEFT JOIN products p ON p.id = a.product_id
+        ORDER BY a.at DESC LIMIT 50`
+    ).all()
+  ).results;
+  return json({
+    alerts: rows.map((a) => ({
+      id: a.id,
+      productId: a.product_id,
+      type: a.type,
+      price: a.price,
+      prevPrice: a.prev_price,
+      message: a.message,
+      at: a.at,
+      delivered: Boolean(a.delivered),
+      title: a.title,
+      url: a.url,
+      domain: a.domain,
+      image: a.image,
+      currency: a.currency,
+    })),
+  });
+}
+
+// Extension popup: "is the page I'm on tracked?" Matches exactly the way
+// addOrObserve dedupes — normalized URL first, canonical key second.
+async function lookupProduct(env, url) {
+  const raw = url.searchParams.get('url');
+  if (!raw) return json({ error: 'url query parameter is required' }, 400);
+  let norm;
+  try {
+    norm = normalizeUrl(raw);
+  } catch (err) {
+    return json({ error: err.message || 'Invalid URL' }, 400);
+  }
+  let row = await env.DB.prepare('SELECT * FROM products WHERE url = ?').bind(norm).first();
+  if (!row) {
+    const ck = canonicalKey(norm);
+    if (ck) row = await env.DB.prepare('SELECT * FROM products WHERE canonical_key = ?').bind(ck).first();
+  }
+  if (!row) return json({ product: null });
+  return json({ product: await getProduct(env, row.id) });
 }
 
 async function getProduct(env, id) {
@@ -301,6 +418,7 @@ async function addOrObserve(env, b) {
     rating: cleanRating(b.rating),
     reviewCount: cleanCount(b.reviewCount),
     model: cleanText(b.model, 80),
+    availability: cleanAvailability(b.availability),
   };
   const delivery = {
     text: cleanText(b.deliveryText, 160),
@@ -319,6 +437,10 @@ async function addOrObserve(env, b) {
     if (hasDelivery) await saveDelivery(env, existing.id, delivery);
     return json({ product: await getProduct(env, existing.id), existing: true });
   }
+
+  // Passive captures (extension content script) only ever update products the
+  // user already tracks — browsing a store must never auto-add products.
+  if (b.observeOnly) return json({ product: null, existing: false, observed: false });
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -361,6 +483,10 @@ async function observe(env, product, r, source) {
       .run();
     return;
   }
+  const availability = cleanAvailability(r.availability);
+  // Alerts read the pre-observation state (old low, old availability, old
+  // flags), so evaluate before the new history row and product update land.
+  await evaluateAlerts(env, product, { price: r.price, availability, last });
   const changed = !last || Math.abs(last.price - r.price) > 0.009;
   const heartbeat = last && Date.now() - Date.parse(last.at) > 20 * 3600 * 1000;
   if (changed || heartbeat) {
@@ -379,6 +505,7 @@ async function observe(env, product, r, source) {
        review_count = COALESCE(?, review_count),
        model = COALESCE(model, ?),
        canonical_key = COALESCE(canonical_key, ?),
+       availability = COALESCE(?, availability),
        last_checked = ?, last_status = 'ok', last_error = NULL
      WHERE id = ?`
   )
@@ -392,6 +519,7 @@ async function observe(env, product, r, source) {
       r.reviewCount ?? null,
       r.model ?? null,
       canonicalKey(product.url),
+      availability,
       now,
       product.id
     )
@@ -459,12 +587,19 @@ async function cleanupGroups(env) {
 /* ---------- cron sweep ---------- */
 
 // Stalest-first batch. Effective per-product cadence: 2h * ceil(count / batch).
+// Bot-blocked products are skipped for 24h at a time — the extension owns
+// them (residential IP beats the bot wall); a daily server re-probe is enough
+// to notice a store unblocking, without burning a batch slot every sweep on a
+// guaranteed failure.
 async function sweep(env) {
+  const blockedCutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const rows = (
     await env.DB.prepare(
-      'SELECT * FROM products WHERE archived = 0 ORDER BY last_checked IS NOT NULL, last_checked ASC LIMIT ?'
+      `SELECT * FROM products WHERE archived = 0
+         AND (last_status IS NULL OR last_status != 'blocked' OR last_checked IS NULL OR last_checked < ?)
+       ORDER BY last_checked IS NOT NULL, last_checked ASC LIMIT ?`
     )
-      .bind(batchSize(env))
+      .bind(blockedCutoff, batchSize(env))
       .all()
   ).results;
   const cutoff = Date.now() - 50 * 60 * 1000;

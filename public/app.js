@@ -6,11 +6,18 @@ const state = {
   data: null,
   sel: localStorage.getItem('pricewatch.sel') || null,
   chartMode: 'chart',
+  chartDays: 90, // 30 | 90 | 180 | 'all'
   checkingAll: false,
   selectMode: false,
   selected: new Set(),
   compare: null, // array of product ids, or null
   dismissed: new Set(JSON.parse(localStorage.getItem('pricewatch.dismissed') || '[]')),
+  query: '',
+  sort: 'newest', // newest | priceAsc | priceDesc | discount | drop
+  catFilter: null, // category name, UNCAT, or null = all
+  showArchived: false,
+  fullPoints: new Map(), // product id -> full history (list responses are ~90d windows)
+  alerts: [],
 };
 
 const DAY = 86400_000;
@@ -143,6 +150,27 @@ function atTrackedLow(p) {
   return price <= Math.min(...p.points.map((pt) => pt.p));
 }
 
+// Deal meter: where today's price sits vs the last 90 days of daily samples.
+// pct = share of sampled days the current price undercuts (or matches).
+function dealMeta(p) {
+  const price = currentPrice(p);
+  if (price == null || !p.points || p.points.length < 3) return null;
+  const start = Date.now() - 90 * DAY;
+  let below = 0;
+  let total = 0;
+  for (let i = 0; i <= 90; i++) {
+    const v = priceAt(p.points, start + i * DAY);
+    if (v != null) {
+      total++;
+      if (price <= v + 0.009) below++;
+    }
+  }
+  if (total < 7) return null; // too little history to judge
+  const pct = Math.round((below / total) * 100);
+  const label = pct >= 90 ? 'Excellent' : pct >= 70 ? 'Good' : pct >= 40 ? 'Fair' : 'High';
+  return { pct, label };
+}
+
 /* ---------- delivery ---------- */
 
 function deliveryInfo(p) {
@@ -190,8 +218,39 @@ function categorySections(entries) {
   });
 }
 
-// Entries the watch table renders: groups (>=2 members) and ungrouped singles,
-// newest first. Members are sorted cheapest first.
+// Free-text filter: every word must appear somewhere in title/domain/model/category.
+function productMatches(p, q) {
+  if (!q) return true;
+  const hay = `${p.title || ''} ${p.domain} ${p.model || ''} ${catOf(p) || ''}`.toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
+}
+
+const SORTS = [
+  ['newest', 'Newest first'],
+  ['priceAsc', 'Price · low to high'],
+  ['priceDesc', 'Price · high to low'],
+  ['discount', 'Biggest discount'],
+  ['drop', 'Biggest 30d drop'],
+];
+
+// Sort key for an entry (groups rank by their best/cheapest member).
+function entryVal(e, mode) {
+  const p = e.type === 'single' ? e.p : e.members[0];
+  if (mode === 'priceAsc' || mode === 'priceDesc') return currentPrice(p);
+  if (mode === 'discount') {
+    const offs = (e.type === 'single' ? [e.p] : e.members).map((x) => discountPct(x)).filter((v) => v != null);
+    return offs.length ? Math.max(...offs) : null;
+  }
+  if (mode === 'drop') {
+    const ds = (e.type === 'single' ? [e.p] : e.members).map((x) => delta30(x)).filter((v) => v != null);
+    return ds.length ? Math.min(...ds) : null;
+  }
+  return e.key;
+}
+
+// Entries the watch table renders: groups (>=2 members) and ungrouped singles.
+// Search + category filter keep a group when ANY member matches; sort order
+// follows state.sort (newest first by default). Members sort cheapest first.
 function viewEntries() {
   const gmap = groupsById();
   const members = new Map();
@@ -219,8 +278,32 @@ function viewEntries() {
     });
   }
   for (const p of singles) entries.push({ type: 'single', p, key: Date.parse(p.createdAt || 0) || 0 });
-  entries.sort((a, b) => b.key - a.key);
-  return entries;
+
+  const q = state.query.trim();
+  const cat = state.catFilter;
+  const visible = entries.filter((e) => {
+    const ps = e.type === 'single' ? [e.p] : e.members;
+    const qOk = !q || ps.some((p) => productMatches(p, q));
+    const catOk =
+      !cat || ps.some((p) => (cat === UNCAT ? !catOf(p) : (catOf(p) || '').toLowerCase() === cat.toLowerCase()));
+    return qOk && catOk;
+  });
+
+  const mode = state.sort;
+  if (mode === 'newest') {
+    visible.sort((a, b) => b.key - a.key);
+  } else {
+    const dir = mode === 'priceDesc' || mode === 'discount' ? -1 : 1;
+    visible.sort((a, b) => {
+      const va = entryVal(a, mode);
+      const vb = entryVal(b, mode);
+      if (va == null && vb == null) return b.key - a.key;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      return (va - vb) * dir;
+    });
+  }
+  return visible;
 }
 
 const STOP = new Set(['the', 'a', 'an', 'and', 'for', 'with', 'of', 'to', 'in', 'on', 'by', 'new']);
@@ -305,8 +388,14 @@ async function api(path, method = 'GET', body) {
 }
 
 async function loadState() {
-  state.data = await api('/api/products');
+  state.data = await api('/api/products' + (state.showArchived ? '?archived=1' : ''));
   state.data.groups = state.data.groups || [];
+  state.fullPoints.clear(); // fresh observations invalidate cached full histories
+  try {
+    state.alerts = (await api('/api/alerts')).alerts || [];
+  } catch {
+    state.alerts = []; // alerts table may not exist yet (migration pending)
+  }
   const ids = new Set(state.data.products.map((p) => p.id));
   if (!ids.has(state.sel)) state.sel = state.data.products[0]?.id ?? null;
   if (state.compare) {
@@ -315,6 +404,32 @@ async function loadState() {
   }
   for (const id of [...state.selected]) if (!ids.has(id)) state.selected.delete(id);
   render();
+}
+
+// Full history on demand: list payloads window points to ~90d, so ranges
+// beyond that pull GET /api/products/:id once per product and cache it.
+async function ensureFullPoints(ids) {
+  const missing = ids.filter((id) => !state.fullPoints.has(id));
+  if (!missing.length) return false;
+  await Promise.all(
+    missing.map(async (id) => {
+      try {
+        const r = await api(`/api/products/${id}`);
+        state.fullPoints.set(id, r.product?.points || []);
+      } catch {
+        state.fullPoints.set(id, null); // remember the failure; don't refetch-loop
+      }
+    })
+  );
+  return true;
+}
+
+const needsFullHistory = () => state.chartDays === 'all' || state.chartDays > (state.data?.meta?.pointsWindowDays ?? 90);
+
+function pointsFor(p) {
+  if (!needsFullHistory()) return p.points;
+  const full = state.fullPoints.get(p.id);
+  return full ?? p.points;
 }
 
 let toastTimer = null;
@@ -328,6 +443,61 @@ function toast(msg) {
 
 function persistDismissed() {
   localStorage.setItem('pricewatch.dismissed', JSON.stringify([...state.dismissed]));
+}
+
+/* ---------- modal helpers (replace prompt/confirm) ---------- */
+
+function pwInput({ title, label = 'Value', value = '', placeholder = '', hint = '', submit = 'Save', options = [] }) {
+  return new Promise((resolve) => {
+    const dlg = $('#dlg-input');
+    $('#input-title').textContent = title;
+    $('#input-label').textContent = label;
+    const inp = $('#input-value');
+    inp.value = value;
+    inp.placeholder = placeholder;
+    $('#input-list').innerHTML = options.map((o) => `<option value="${esc(o)}">`).join('');
+    const hintEl = $('#input-hint');
+    hintEl.textContent = hint;
+    hintEl.hidden = !hint;
+    $('#input-submit').textContent = submit;
+    let result = null; // stays null on Cancel / Escape
+    const onSubmit = () => { result = inp.value; };
+    $('#form-input').addEventListener('submit', onSubmit);
+    dlg.addEventListener(
+      'close',
+      () => {
+        $('#form-input').removeEventListener('submit', onSubmit);
+        resolve(result);
+      },
+      { once: true }
+    );
+    dlg.showModal();
+    inp.select();
+  });
+}
+
+function pwConfirm({ title = 'Are you sure?', message = '', confirmLabel = 'Confirm', danger = false }) {
+  return new Promise((resolve) => {
+    const dlg = $('#dlg-confirm');
+    $('#confirm-title').textContent = title;
+    $('#confirm-message').textContent = message;
+    const btn = $('#confirm-submit');
+    btn.textContent = confirmLabel;
+    btn.classList.toggle('btn-danger', danger);
+    btn.classList.toggle('btn-primary', !danger);
+    let result = false;
+    const onSubmit = () => { result = true; };
+    $('#form-confirm').addEventListener('submit', onSubmit);
+    dlg.addEventListener(
+      'close',
+      () => {
+        $('#form-confirm').removeEventListener('submit', onSubmit);
+        resolve(result);
+      },
+      { once: true }
+    );
+    dlg.showModal();
+  });
 }
 
 /* ---------- header ---------- */
@@ -447,6 +617,7 @@ function rowHTML(p, { inGroup = false, best = false } = {}) {
     `<span class="prod-domain">${esc(p.domain)}</span>`,
     ratingInline(p),
     deliveryInline(p),
+    p.availability === 'OutOfStock' ? `<span class="pill pill-oos">out of stock</span>` : '',
     best ? `<span class="pill pill-best">best price</span>` : '',
     !inGroup && atTrackedLow(p) ? `<span class="pill pill-low">lowest yet</span>` : '',
   ].filter(Boolean);
@@ -515,12 +686,35 @@ function suggestHTML() {
   </div>`;
 }
 
+function wireArchivedToggle(root) {
+  $('#btn-archived', root)?.addEventListener('click', async () => {
+    state.showArchived = !state.showArchived;
+    state.selectMode = false;
+    state.selected.clear();
+    state.compare = null;
+    state.sel = null;
+    try {
+      await loadState();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+}
+
 function renderWatch() {
   const root = $('#watch-section');
   const { products } = state.data;
 
   if (!products.length) {
-    root.innerHTML = `<div class="card"><div class="empty">
+    root.innerHTML = state.showArchived
+      ? `<div class="card">
+          <div class="card-head">
+            <span class="eyebrow">Archived · 0</span>
+            <button class="btn btn-sm btn-ghost" id="btn-archived" type="button">${icon('archive')}<span>Back to tracking</span></button>
+          </div>
+          <div class="empty">${icon('archive')}<p>No archived products.</p></div>
+        </div>`
+      : `<div class="card"><div class="empty">
       ${icon('tag')}
       <p><strong>Nothing tracked yet.</strong><br>
       Click the PriceWatch extension on any product page for one-click tracking,
@@ -528,12 +722,14 @@ function renderWatch() {
       <button class="btn btn-primary" id="empty-add">${icon('plus')}<span>Track a product</span></button>
     </div></div>`;
     $('#empty-add')?.addEventListener('click', () => $('#dlg-add').showModal());
+    wireArchivedToggle(root);
     renderSelectBar();
     return;
   }
 
   const colCount = state.selectMode ? 7 : 6;
   const entries = viewEntries();
+  const shown = entries.reduce((n, e) => n + (e.type === 'single' ? 1 : e.members.length), 0);
   const entryHTML = (e) => {
     if (e.type === 'single') return rowHTML(e.p);
     const priced = e.members.filter((p) => currentPrice(p) != null);
@@ -546,24 +742,46 @@ function renderWatch() {
   };
   // Category sections only appear once something is categorized — a fresh
   // install keeps the familiar flat list.
-  const body = products.some(catOf)
-    ? categorySections(entries)
-        .map(
-          (sec) =>
-            `<tr class="cat-head"><td colspan="${colCount}"><span class="cat-name">${esc(sec.name)}</span><span class="cat-count">${sec.list.length}</span></td></tr>` +
-            sec.list.map(entryHTML).join('')
-        )
-        .join('')
-    : entries.map(entryHTML).join('');
+  const body = !entries.length
+    ? `<tr><td colspan="${colCount}"><div class="empty-inline">No products match — clear the search or filters.</div></td></tr>`
+    : products.some(catOf)
+      ? categorySections(entries)
+          .map(
+            (sec) =>
+              `<tr class="cat-head"><td colspan="${colCount}"><span class="cat-name">${esc(sec.name)}</span><span class="cat-count">${sec.list.length}</span></td></tr>` +
+              sec.list.map(entryHTML).join('')
+          )
+          .join('')
+      : entries.map(entryHTML).join('');
+
+  const controls = `<div class="list-controls">
+      <span class="search-wrap">${icon('search')}<input id="q" placeholder="Search title, store, model…" value="${esc(state.query)}" autocomplete="off" aria-label="Search products"></span>
+      <select id="sort-sel" class="sort-sel" aria-label="Sort products">
+        ${SORTS.map(([v, l]) => `<option value="${v}" ${state.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select>
+    </div>`;
+  const cats = allCategories();
+  const chips = cats.length
+    ? `<div class="chips">${[['', 'All'], ...cats.map((c) => [c, c]), [UNCAT, UNCAT]]
+        .map(([v, l]) => `<button class="chip" data-cat="${esc(v)}" aria-pressed="${(state.catFilter || '') === v}" type="button">${esc(l)}</button>`)
+        .join('')}</div>`
+    : '';
 
   root.innerHTML = `<div class="card">
     <div class="card-head">
-      <span class="eyebrow">Tracking · ${products.length} ${products.length === 1 ? 'product' : 'products'}</span>
-      <button class="btn btn-sm btn-ghost" id="btn-select" type="button">
-        ${state.selectMode ? icon('x') : icon('check')}<span>${state.selectMode ? 'Done selecting' : 'Select'}</span>
-      </button>
+      <span class="eyebrow">${state.showArchived ? 'Archived' : 'Tracking'} · ${shown === products.length ? products.length : `${shown} of ${products.length}`} ${products.length === 1 ? 'product' : 'products'}</span>
+      <span class="head-actions">
+        <button class="btn btn-sm btn-ghost" id="btn-archived" type="button">
+          ${icon('archive')}<span>${state.showArchived ? 'Back to tracking' : 'Archived'}</span>
+        </button>
+        <button class="btn btn-sm btn-ghost" id="btn-select" type="button">
+          ${state.selectMode ? icon('x') : icon('check')}<span>${state.selectMode ? 'Done selecting' : 'Select'}</span>
+        </button>
+      </span>
     </div>
-    ${suggestHTML()}
+    ${controls}
+    ${chips}
+    ${state.showArchived ? '' : suggestHTML()}
     <table class="watch-table">
       <thead><tr>
         ${state.selectMode ? '<th class="col-select"></th>' : ''}
@@ -573,6 +791,26 @@ function renderWatch() {
       <tbody>${body}</tbody>
     </table>
   </div>`;
+
+  wireArchivedToggle(root);
+  const qEl = $('#q', root);
+  qEl.addEventListener('input', () => {
+    state.query = qEl.value;
+    renderWatch();
+    const q2 = $('#q');
+    q2.focus();
+    q2.setSelectionRange(q2.value.length, q2.value.length);
+  });
+  $('#sort-sel', root).addEventListener('change', (e) => {
+    state.sort = e.target.value;
+    renderWatch();
+  });
+  root.querySelectorAll('.chip').forEach((ch) =>
+    ch.addEventListener('click', () => {
+      state.catFilter = ch.dataset.cat || null;
+      renderWatch();
+    })
+  );
 
   $('#btn-select').addEventListener('click', () => {
     state.selectMode = !state.selectMode;
@@ -623,7 +861,7 @@ function renderWatch() {
       if (!g) return;
       if (btn.dataset.gact === 'compare') return openCompareForGroup(gid);
       if (btn.dataset.gact === 'rename') {
-        const name = prompt('Group name:', g.name);
+        const name = await pwInput({ title: 'Rename group', label: 'Group name', value: g.name, submit: 'Rename' });
         if (!name || !name.trim()) return;
         try {
           await api(`/api/groups/${gid}`, 'PATCH', { name: name.trim() });
@@ -631,7 +869,13 @@ function renderWatch() {
         } catch (err) { toast(err.message); }
       }
       if (btn.dataset.gact === 'ungroup') {
-        if (!confirm(`Ungroup "${g.name}"? The products stay tracked, just no longer grouped.`)) return;
+        const ok = await pwConfirm({
+          title: 'Ungroup?',
+          message: `"${g.name}" — the products stay tracked, just no longer grouped.`,
+          confirmLabel: 'Ungroup',
+          danger: true,
+        });
+        if (!ok) return;
         try {
           await api(`/api/groups/${gid}`, 'DELETE');
           state.compare = null;
@@ -708,7 +952,13 @@ function renderSelectBar() {
       .filter(Boolean)
       .map((p) => shortTitle(p.title || p.url, 48));
     const preview = names.slice(0, 4).join('\n') + (names.length > 4 ? `\n…and ${names.length - 4} more` : '');
-    if (!confirm(`Stop tracking ${ids.length} ${ids.length === 1 ? 'product' : 'products'} and delete their price history?\n\n${preview}`)) return;
+    const ok = await pwConfirm({
+      title: `Delete ${ids.length} ${ids.length === 1 ? 'product' : 'products'}?`,
+      message: `Price history goes with them.\n\n${preview}`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const r = await api('/api/products/bulk-delete', 'POST', { ids });
       state.selectMode = false;
@@ -733,11 +983,14 @@ function renderSelectBar() {
     if (!ids.length) return;
     const cats = allCategories();
     const first = state.data.products.find((p) => p.id === ids[0]);
-    const c = prompt(
-      `Category for ${ids.length} ${ids.length === 1 ? 'product' : 'products'} (leave blank to remove)` +
-        (cats.length ? `\nExisting: ${cats.join(', ')}` : ''),
-      (first && catOf(first)) || ''
-    );
+    const c = await pwInput({
+      title: `Category for ${ids.length} ${ids.length === 1 ? 'product' : 'products'}`,
+      label: 'Category',
+      value: (first && catOf(first)) || '',
+      placeholder: 'e.g. Shoes, Camera gear',
+      hint: 'Leave blank to remove the category.',
+      options: cats,
+    });
     if (c == null) return;
     try {
       for (const id of ids) await api(`/api/products/${id}`, 'PATCH', { category: c.trim() || null });
@@ -750,7 +1003,7 @@ function renderSelectBar() {
   $('[data-bar="group"]', bar).addEventListener('click', async () => {
     const ids = [...state.selected];
     const ps = ids.map((id) => state.data.products.find((p) => p.id === id)).filter(Boolean);
-    const name = prompt('Name this group:', commonName(ps));
+    const name = await pwInput({ title: 'Group products', label: 'Group name', value: commonName(ps), submit: 'Group' });
     if (name == null) return;
     await createGroupFromIds(ids, name.trim() || commonName(ps), { compareAfter: true });
   });
@@ -788,16 +1041,34 @@ function renderTiles(p) {
   const mrp = mrpOf(p);
   const off = discountPct(p);
   const d = deliveryInfo(p);
+  const deal = dealMeta(p);
+  const target = p.targetPrice;
 
   const priceExtra =
-    mrp != null
+    (mrp != null
       ? `<span class="mrp-strike">${fmtMoney(mrp, p.currency)}</span>${off ? `<span class="pill pill-off">-${off}%</span>` : ''}`
-      : '';
+      : '') + (p.availability === 'OutOfStock' ? `<span class="pill pill-oos">out of stock</span>` : '');
+
+  let targetSub = 'alerts you when the price drops to it';
+  if (target != null && price != null) {
+    targetSub = price <= target ? 'target reached — check the alerts bell' : `${fmtMoney(price - target, p.currency)} above target`;
+  }
 
   return `<div class="tiles">
     <div class="tile"><div class="t-label">Current price</div>
       <div class="t-value num">${price != null ? fmtMoney(price, p.currency) : '—'}${priceExtra}</div>
       <div class="t-sub">${atTrackedLow(p) ? 'lowest tracked price' : esc(p.domain)}</div></div>
+    <div class="tile tile-target" data-act="target" role="button" tabindex="0" title="Set a target price — you get an alert when the price reaches it">
+      <div class="t-label">Target price</div>
+      <div class="t-value num">${icon('target')}${target != null ? fmtMoney(target, p.currency) : '<span class="dim">set…</span>'}</div>
+      <div class="t-sub">${targetSub}</div></div>
+    <div class="tile"><div class="t-label">Deal meter</div>
+      <div class="t-value">${
+        deal
+          ? `<span class="${deal.pct >= 70 ? 'deal-good' : deal.pct < 40 ? 'deal-high' : ''}">${deal.label}</span>`
+          : '<span class="dim">—</span>'
+      }</div>
+      <div class="t-sub">${deal ? `cheaper than ${deal.pct}% of the last 90 days` : 'needs a week of history'}</div></div>
     <div class="tile"><div class="t-label">90-day low</div>
       <div class="t-value num">${r90 ? fmtMoney(r90.min, p.currency) : '—'}</div>
       <div class="t-sub">${atLow90 ? 'price is at its 90-day low' : '&nbsp;'}</div></div>
@@ -820,24 +1091,50 @@ function renderTiles(p) {
 
 /* ---------- charts (single + multi series) ---------- */
 
-function chartPoints(points) {
+// Shared x-domain for all series. 'all' spans back to the earliest point
+// anywhere (minimum 7 days so a day-old product doesn't zoom to noise).
+function chartWindow(seriesIn, days) {
   const now = Date.now();
-  const start = now - 90 * DAY;
+  if (days === 'all') {
+    let first = Infinity;
+    for (const s of seriesIn) for (const pt of s.points) first = Math.min(first, Date.parse(pt.t));
+    return { start: Number.isFinite(first) ? Math.min(first, now - 7 * DAY) : now - 90 * DAY, now };
+  }
+  return { start: now - days * DAY, now };
+}
+
+// Last value at-or-before t for the given key ('p' price, 'm' MRP — MRP rows
+// are sparse, the last known value holds).
+function valueAt(points, t, key) {
+  let v = null;
+  for (const pt of points) {
+    if (Date.parse(pt.t) > t) break;
+    if (pt[key] != null) v = pt[key];
+  }
+  return v;
+}
+
+function chartPoints(points, start, now, key = 'p') {
   const pts = [];
-  const v0 = priceAt(points, start);
+  const v0 = valueAt(points, start, key);
   if (v0 != null) pts.push({ t: start, p: v0 });
   for (const pt of points) {
     const t = Date.parse(pt.t);
-    if (t >= start) pts.push({ t, p: pt.p });
+    if (t >= start && pt[key] != null) pts.push({ t, p: pt[key] });
   }
   if (pts.length) pts.push({ t: now, p: pts[pts.length - 1].p });
   return pts.length >= 2 ? pts : null;
 }
 
+const dateYearFmt = new Intl.DateTimeFormat('en-IN', { month: 'short', year: '2-digit' });
+
 // series: [{ label, color, currency, points }] — points are the raw API rows.
-function drawChart(mount, seriesIn) {
+// Single-series charts additionally draw the MRP as a dashed step line and a
+// dashed "typical" (median) guide.
+function drawChart(mount, seriesIn, days = 90) {
+  const { start, now } = chartWindow(seriesIn, days);
   const series = seriesIn
-    .map((s) => ({ ...s, pts: chartPoints(s.points) }))
+    .map((s) => ({ ...s, pts: chartPoints(s.points, start, now, 'p') }))
     .filter((s) => s.pts);
   if (!series.length) {
     mount.innerHTML = `<div class="empty-inline">No price history yet — it builds up as checks run.</div>`;
@@ -850,16 +1147,33 @@ function drawChart(mount, seriesIn) {
   const iw = width - M.l - M.r;
   const ih = H - M.t - M.b;
 
-  const now = Date.now();
-  const start = now - 90 * DAY;
+  const single = series.length === 1;
+  const mrpPts = single ? chartPoints(series[0].points, start, now, 'm') : null;
+
+  let median = null;
+  if (single) {
+    const vals = [];
+    for (let i = 0; i <= 60; i++) {
+      const v = valueAt(series[0].points, start + ((now - start) * i) / 60, 'p');
+      if (v != null) vals.push(v);
+    }
+    if (vals.length >= 7) {
+      vals.sort((a, b) => a - b);
+      median = vals[Math.floor(vals.length / 2)];
+    }
+  }
+
   let min = Infinity, max = -Infinity;
   for (const s of series) for (const pt of s.pts) { min = Math.min(min, pt.p); max = Math.max(max, pt.p); }
+  if (mrpPts) for (const pt of mrpPts) { min = Math.min(min, pt.p); max = Math.max(max, pt.p); }
+  if (median != null) { min = Math.min(min, median); max = Math.max(max, median); }
   const pad = (max - min) * 0.06 || max * 0.02 || 1;
   min -= pad; max += pad;
 
   const x = (t) => M.l + ((t - start) / (now - start)) * iw;
   const y = (v) => M.t + (1 - (v - min) / (max - min)) * ih;
   const cur = series[0].currency;
+  const xFmt = now - start > 330 * DAY ? dateYearFmt : dateFmt;
 
   let g = '';
   for (let i = 0; i <= 3; i++) {
@@ -870,9 +1184,26 @@ function drawChart(mount, seriesIn) {
   }
   for (let i = 0; i <= 4; i++) {
     const t = start + ((now - start) * i) / 4;
-    g += `<text x="${x(t)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">${dateFmt.format(t)}</text>`;
+    g += `<text x="${x(t)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">${xFmt.format(t)}</text>`;
   }
   g += `<line x1="${M.l}" x2="${M.l + iw}" y1="${M.t + ih}" y2="${M.t + ih}" stroke="var(--baseline)" stroke-width="1"/>`;
+
+  if (median != null) {
+    const py = y(median);
+    g += `<line x1="${M.l}" x2="${M.l + iw}" y1="${py}" y2="${py}" stroke="var(--baseline)" stroke-dasharray="2 4" stroke-width="1"/>`;
+    g += `<text x="${M.l + iw}" y="${py - 4}" text-anchor="end" font-size="10.5" fill="var(--muted)">typical ${fmtCompact(median, cur)}</text>`;
+  }
+
+  if (mrpPts) {
+    let d = '';
+    mrpPts.forEach((pt, i) => {
+      const px = x(pt.t).toFixed(1), py = y(pt.p).toFixed(1);
+      d += i === 0 ? `M${px} ${py}` : `H${px}V${py}`;
+    });
+    g += `<path d="${d}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 4" stroke-linejoin="round"/>`;
+    const lastM = mrpPts[mrpPts.length - 1];
+    g += `<text x="${x(lastM.t).toFixed(1) - 4}" y="${y(lastM.p) - 5}" text-anchor="end" font-size="10.5" fill="var(--muted)">MRP</text>`;
+  }
 
   let defs = '';
   series.forEach((s, si) => {
@@ -938,6 +1269,10 @@ function drawChart(mount, seriesIn) {
           ? `<div class="tt-row"><span class="dim">Price</span><span class="num">${fmtMoney(v, s.currency)}</span></div>`
           : `<div class="tt-row"><span class="tt-name"><span class="lg-dot" style="background:${s.color}"></span><span>${esc(s.label)}</span></span><span class="num">${fmtMoney(v, s.currency)}</span></div>`;
     }
+    if (mrpPts) {
+      const mv = valueAt(series[0].points, clamped, 'm');
+      if (mv != null) rows += `<div class="tt-row"><span class="dim">MRP</span><span class="num dim">${fmtMoney(mv, series[0].currency)}</span></div>`;
+    }
     dots.innerHTML = dotHtml;
     tip.innerHTML = `<div class="tt-date">${dateFmt.format(clamped)}</div>${rows}`;
     tip.hidden = false;
@@ -966,6 +1301,27 @@ function getTooltip() {
     document.body.appendChild(tip);
   }
   return tip;
+}
+
+/* ---------- chart range control ---------- */
+
+const rangeLabel = () => (state.chartDays === 'all' ? 'all time' : `${state.chartDays}d`);
+
+function rangeSegHTML() {
+  const opts = [[30, '30d'], [90, '90d'], [180, '180d'], ['all', 'All']];
+  return `<div class="seg seg-range" role="group" aria-label="Chart range">${opts
+    .map(([v, l]) => `<button type="button" data-range="${v}" aria-pressed="${String(state.chartDays) === String(v)}">${l}</button>`)
+    .join('')}</div>`;
+}
+
+function wireRangeSeg(root, rerender) {
+  root.querySelectorAll('[data-range]').forEach((b) =>
+    b.addEventListener('click', () => {
+      const v = b.dataset.range;
+      state.chartDays = v === 'all' ? 'all' : Number(v);
+      rerender();
+    })
+  );
 }
 
 /* ---------- compare view ---------- */
@@ -1093,7 +1449,7 @@ function renderCompare(root) {
         <button class="btn btn-icon" data-act="close-compare" title="Close comparison" aria-label="Close comparison">${icon('x')}</button>
       </div>
     </div>
-    <div class="chart-tools"><span class="eyebrow">Price history · 90d · overlaid</span></div>
+    <div class="chart-tools"><span class="eyebrow">Price history · ${rangeLabel()} · overlaid</span>${rangeSegHTML()}</div>
     <div class="chart-wrap" id="cmp-chart"></div>
     <div class="cmp-scroll">
       <table class="cmp-table">
@@ -1107,8 +1463,15 @@ function renderCompare(root) {
 
   drawChart(
     $('#cmp-chart', root),
-    ps.map((p, i) => ({ label: `${p.domain}`, color: colors[i], currency: p.currency, points: p.points }))
+    ps.map((p, i) => ({ label: `${p.domain}`, color: colors[i], currency: p.currency, points: pointsFor(p) })),
+    state.chartDays
   );
+  wireRangeSeg(root, () => renderCompare(root));
+  if (needsFullHistory()) {
+    ensureFullPoints(ps.map((p) => p.id)).then((fetched) => {
+      if (fetched && state.compare) renderCompare($('#detail-section'));
+    });
+  }
 
   $('[data-act="close-compare"]', root).addEventListener('click', () => {
     state.compare = null;
@@ -1116,7 +1479,7 @@ function renderCompare(root) {
   });
   $('[data-act="rename-group"]', root)?.addEventListener('click', async () => {
     const g = groupsById().get(gid);
-    const name = prompt('Group name:', g?.name || '');
+    const name = await pwInput({ title: 'Rename group', label: 'Group name', value: g?.name || '', submit: 'Rename' });
     if (!name || !name.trim()) return;
     try {
       await api(`/api/groups/${gid}`, 'PATCH', { name: name.trim() });
@@ -1145,7 +1508,9 @@ function renderDetail() {
   const p = state.data.products.find((x) => x.id === state.sel);
   if (!p) { root.innerHTML = ''; return; }
 
-  const hasPts = chartPoints(p.points);
+  const pts = pointsFor(p);
+  const win = chartWindow([{ points: pts }], state.chartDays);
+  const hasPts = chartPoints(pts, win.start, win.now, 'p');
   const gname = p.groupId ? groupsById().get(p.groupId)?.name : null;
 
   const toggle = `<div class="seg" role="group" aria-label="Chart or table view">
@@ -1157,8 +1522,8 @@ function renderDetail() {
   if (!hasPts) {
     bodyHTML = `<div class="empty-inline">No price history yet — it builds up as checks run.</div>`;
   } else if (state.chartMode === 'table') {
-    const anyMrp = p.points.some((pt) => pt.m != null);
-    const rows = [...p.points].reverse().slice(0, 200).map((pt) =>
+    const anyMrp = pts.some((pt) => pt.m != null);
+    const rows = [...pts].reverse().slice(0, 200).map((pt) =>
       `<tr><td class="num">${dateTimeFmt.format(Date.parse(pt.t))}</td><td class="right num">${fmtMoney(pt.p, p.currency)}</td>${
         anyMrp ? `<td class="right num">${pt.m != null ? fmtMoney(pt.m, p.currency) : '<span class="dim">—</span>'}</td>` : ''
       }</tr>`
@@ -1191,25 +1556,68 @@ function renderDetail() {
         <button class="btn btn-icon" data-act="category" title="Set category" aria-label="Set category">${icon('tag')}</button>
         <button class="btn btn-icon" data-act="refresh" title="Check price now" aria-label="Check price now">${icon('refresh')}</button>
         <a class="btn btn-icon" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer" title="Open product page" aria-label="Open product page">${icon('external')}</a>
+        <button class="btn btn-icon" data-act="archive" title="${p.archived ? 'Restore to tracking' : 'Archive (keeps history, stops checks)'}" aria-label="${p.archived ? 'Unarchive' : 'Archive'}">${icon('archive')}</button>
         <button class="btn btn-icon" data-act="delete" title="Stop tracking" aria-label="Stop tracking">${icon('trash')}</button>
       </div>
     </div>
     ${renderTiles(p)}
-    <div class="chart-tools"><span class="eyebrow">Price history · 90d</span>${toggle}</div>
+    <div class="chart-tools"><span class="eyebrow">Price history · ${rangeLabel()}</span><span class="head-actions">${rangeSegHTML()}${toggle}</span></div>
     ${bodyHTML}
   </div>`;
 
   if (hasPts && state.chartMode === 'chart') {
-    drawChart($('#chart-mount', root), [
-      { label: p.domain, color: SERIES_COLORS[0], currency: p.currency, points: p.points },
-    ]);
+    drawChart(
+      $('#chart-mount', root),
+      [{ label: p.domain, color: SERIES_COLORS[0], currency: p.currency, points: pts }],
+      state.chartDays
+    );
+  }
+  wireRangeSeg(root, renderDetail);
+  if (needsFullHistory() && !state.fullPoints.has(p.id)) {
+    ensureFullPoints([p.id]).then((fetched) => {
+      if (fetched && !state.compare && state.sel === p.id) renderDetail();
+    });
   }
 
-  root.querySelectorAll('.seg button').forEach((b) =>
+  root.querySelectorAll('.seg [data-mode]').forEach((b) =>
     b.addEventListener('click', () => { state.chartMode = b.dataset.mode; renderDetail(); }));
 
+  const setTarget = async () => {
+    const v = await pwInput({
+      title: 'Target price',
+      label: `Alert when the price drops to (${p.currency})`,
+      value: p.targetPrice != null ? String(p.targetPrice) : '',
+      placeholder: 'e.g. 3999',
+      hint: 'Leave blank to remove the target. One alert per crossing — it re-arms when the price rises back above the target.',
+      submit: 'Save target',
+    });
+    if (v == null) return;
+    const t = v.trim();
+    const num = t === '' ? null : Number(t.replace(/[^\d.]/g, ''));
+    if (t !== '' && (!Number.isFinite(num) || num <= 0)) { toast('Enter a number, e.g. 3999.'); return; }
+    try {
+      await api(`/api/products/${p.id}`, 'PATCH', { targetPrice: num });
+      toast(num == null ? 'Target removed.' : `Target set — you'll hear when it hits ${fmtMoney(num, p.currency)}.`);
+      await loadState();
+    } catch (err) { toast(err.message); }
+  };
+  const tileTarget = $('[data-act="target"]', root);
+  tileTarget?.addEventListener('click', setTarget);
+  tileTarget?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setTarget(); }
+  });
+
+  $('[data-act="archive"]', root).addEventListener('click', async () => {
+    try {
+      await api(`/api/products/${p.id}`, 'PATCH', { archived: !p.archived });
+      toast(p.archived ? 'Restored to tracking.' : 'Archived — find it under Archived in the list header.');
+      state.sel = null;
+      await loadState();
+    } catch (err) { toast(err.message); }
+  });
+
   $('[data-act="rename"]', root).addEventListener('click', async () => {
-    const name = prompt('Product name:', p.title || '');
+    const name = await pwInput({ title: 'Rename product', label: 'Product name', value: p.title || '', submit: 'Rename' });
     if (!name || !name.trim()) return;
     try {
       await api(`/api/products/${p.id}`, 'PATCH', { title: name.trim() });
@@ -1218,11 +1626,14 @@ function renderDetail() {
   });
 
   $('[data-act="category"]', root).addEventListener('click', async () => {
-    const cats = allCategories();
-    const c = prompt(
-      `Category (leave blank to remove)${cats.length ? `\nExisting: ${cats.join(', ')}` : ''}`,
-      catOf(p) || ''
-    );
+    const c = await pwInput({
+      title: 'Set category',
+      label: 'Category',
+      value: catOf(p) || '',
+      placeholder: 'e.g. Shoes, Camera gear',
+      hint: 'Leave blank to remove the category.',
+      options: allCategories(),
+    });
     if (c == null) return;
     try {
       await api(`/api/products/${p.id}`, 'PATCH', { category: c.trim() || null });
@@ -1249,7 +1660,13 @@ function renderDetail() {
   });
 
   $('[data-act="delete"]', root).addEventListener('click', async () => {
-    if (!confirm(`Stop tracking "${p.title || p.url}" and delete its history?`)) return;
+    const ok = await pwConfirm({
+      title: 'Stop tracking?',
+      message: `"${p.title || p.url}" and its price history will be deleted. Archiving keeps the history instead.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api(`/api/products/${p.id}`, 'DELETE');
       state.sel = null;
@@ -1283,15 +1700,101 @@ async function checkAll() {
   await loadState();
 }
 
+/* ---------- alerts panel ---------- */
+
+const ALERT_ICON = { target: 'target', low: 'down', drop: 'down', restock: 'package' };
+
+const latestAlertAt = () => state.alerts[0]?.at || '';
+
+function updateAlertDot() {
+  const dot = $('#alert-dot');
+  if (!dot) return;
+  const seen = localStorage.getItem('pricewatch.alertsSeen') || '';
+  dot.hidden = !latestAlertAt() || latestAlertAt() <= seen;
+}
+
+function openAlerts() {
+  const list = $('#alerts-list');
+  if (!state.alerts.length) {
+    list.innerHTML = `<div class="empty-inline">No alerts yet. Set a target price on a product (its Target tile) and you'll hear when the price drops to it — plus automatic all-time-low, big-drop and restock alerts.</div>`;
+  } else {
+    list.innerHTML = state.alerts
+      .map((a) => {
+        const line = (a.message || '').split('\n')[1] || (a.message || '').split('\n')[0] || '';
+        const img = a.image
+          ? `<img class="thumb" src="${esc(a.image)}" alt="" loading="lazy">`
+          : `<span class="thumb-ph">${icon('package')}</span>`;
+        return `<div class="alert-row" data-pid="${esc(a.productId)}" role="button" tabindex="0">
+          ${img}
+          <div class="alert-main">
+            <div class="alert-title">${esc(shortTitle(a.title || a.url || 'Product', 64))}</div>
+            <div class="alert-msg">${esc(line)}</div>
+            <div class="alert-meta">${relTime(a.at) || ''}${a.delivered ? ' · emailed' : ''}</div>
+          </div>
+          <span class="alert-type alert-${esc(a.type)}">${icon(ALERT_ICON[a.type] || 'alert')}${esc(a.type)}</span>
+        </div>`;
+      })
+      .join('');
+  }
+  $('#alerts-note').textContent = state.data?.meta?.email
+    ? 'Alerts are also emailed to you.'
+    : 'Tip: set the Gmail alert secrets (see README → Price alerts) to get these emailed to your inbox.';
+  const dlg = $('#dlg-alerts');
+  dlg.showModal();
+  if (latestAlertAt()) localStorage.setItem('pricewatch.alertsSeen', latestAlertAt());
+  updateAlertDot();
+  list.querySelectorAll('.alert-row').forEach((row) => {
+    row.addEventListener('click', () => {
+      const pid = row.dataset.pid;
+      if (state.data.products.some((p) => p.id === pid)) {
+        state.sel = pid;
+        state.compare = null;
+        localStorage.setItem('pricewatch.sel', pid);
+        dlg.close();
+        render();
+      }
+    });
+  });
+}
+
+/* ---------- per-store health ---------- */
+
+function renderHealth() {
+  const el = $('#health-line');
+  if (!el || !state.data) return;
+  const byDomain = new Map();
+  for (const p of state.data.products) {
+    if (!byDomain.has(p.domain)) byDomain.set(p.domain, { ok: 0, blocked: 0, error: 0, total: 0 });
+    const d = byDomain.get(p.domain);
+    d.total++;
+    if (p.lastStatus === 'ok') d.ok++;
+    else if (p.lastStatus === 'blocked') d.blocked++;
+    else if (p.lastStatus === 'error') d.error++;
+  }
+  const trouble = [...byDomain].filter(([, d]) => d.blocked + d.error > 0);
+  el.textContent = !state.data.products.length
+    ? ''
+    : trouble.length
+      ? 'Store health: ' +
+        trouble
+          .map(([dom, d]) => `${dom} ${d.ok}/${d.total} ok${d.blocked ? ' — bot-walled, the extension keeps it fresh' : ''}`)
+          .join(' · ')
+      : 'Store health: all server checks passing.';
+}
+
 /* ---------- root render + global wiring ---------- */
 
 function render() {
   renderHeader();
   renderWatch();
   renderDetail();
+  renderHealth();
+  updateAlertDot();
 }
 
 $('#btn-check-all').addEventListener('click', () => checkAll().catch((err) => toast(err.message)));
+
+$('#btn-alerts').addEventListener('click', openAlerts);
 
 // Refresh = re-pull saved data only (picks up extension clicks and cron runs).
 // Sync prices (above) is the one that re-scrapes stores.
@@ -1327,6 +1830,7 @@ document.querySelectorAll('dialog').forEach((dlg) =>
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  if (document.querySelector('dialog[open]')) return; // the dialog eats its own Escape
   if (state.selectMode) {
     state.selectMode = false;
     state.selected.clear();
@@ -1378,5 +1882,10 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(renderDetail, 150);
 });
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+
+// PWA: installable + instant loads. API calls bypass the cache entirely.
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 
 loadState().catch((err) => toast('Could not reach the server: ' + err.message));

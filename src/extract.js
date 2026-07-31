@@ -202,6 +202,14 @@ function findProductNode(node, depth = 0) {
   return null;
 }
 
+// schema.org availability URI/enum -> our two-state model (null = unknown).
+export function parseAvailability(v) {
+  if (typeof v !== 'string') return null;
+  const m = /(InStock|LimitedAvailability|InStoreOnly|OnlineOnly|OutOfStock|SoldOut|Discontinued)/i.exec(v);
+  if (!m) return null;
+  return /InStock|LimitedAvailability|InStoreOnly|OnlineOnly/i.test(m[1]) ? 'InStock' : 'OutOfStock';
+}
+
 function offerFields(offers) {
   const list = Array.isArray(offers) ? offers : [offers];
   for (const offer of list) {
@@ -211,7 +219,7 @@ function offerFields(offers) {
     const cur = typeof offer.priceCurrency === 'string' && /^[A-Za-z]{3}$/.test(offer.priceCurrency)
       ? offer.priceCurrency.toUpperCase()
       : null;
-    return { price, currency: cur };
+    return { price, currency: cur, availability: parseAvailability(offer.availability) };
   }
   return null;
 }
@@ -247,6 +255,7 @@ export function extractJsonLd(html) {
       ok: true,
       price: fields.price,
       currency: fields.currency,
+      availability: fields.availability,
       title: typeof product.name === 'string' ? decodeEntities(product.name) : null,
       image: ldImage(product.image),
       ...ratingFromLd(product),
@@ -494,7 +503,7 @@ function extrasFor(html, host, price) {
 // Fill currency/title/image gaps from generic page metadata, then layer on
 // MRP / rating / review count / model from site-specific + generic scans.
 function finalize(result, html, host) {
-  const out = { mrp: null, rating: null, reviewCount: null, model: null, ...result };
+  const out = { mrp: null, rating: null, reviewCount: null, model: null, availability: null, ...result };
   if (html) {
     out.title = out.title ?? pageTitle(html);
     out.image = out.image ?? pageImage(html);

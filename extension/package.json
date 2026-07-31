@@ -1,0 +1,4 @@
+{
+  "type": "commonjs",
+  "//": "Chrome ignores this file. It exists so Node tooling (tests requiring parse.js) treats extension scripts as CommonJS despite the repo root's type:module."
+}

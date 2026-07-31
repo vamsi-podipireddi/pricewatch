@@ -1,7 +1,10 @@
--- PriceWatch D1 schema (v2). Fresh installs apply this file:
---   npx wrangler d1 execute pricewatch --remote --file=schema.sql
---   npx wrangler d1 execute pricewatch --local  --file=schema.sql   (for `wrangler dev`)
--- Existing v1 databases: apply migrations/0002_v2.sql instead (keeps your data).
+-- PriceWatch D1 schema (v4) — reference copy of the CURRENT full schema, for
+-- dashboard-console installs where the CLI isn't available:
+--   dashboard -> D1 -> pricewatch -> Console -> paste -> Execute
+-- The canonical install/upgrade path is the migrations pipeline:
+--   npx wrangler d1 migrations apply pricewatch --remote   (npm run db:migrate)
+-- Fresh CLI installs should use migrations (0001..000N), not this file, so the
+-- d1_migrations bookkeeping stays correct from day one.
 
 CREATE TABLE IF NOT EXISTS products (
   id               TEXT PRIMARY KEY,
@@ -19,6 +22,9 @@ CREATE TABLE IF NOT EXISTS products (
   canonical_key    TEXT,                   -- store-stable product id, e.g. "amazon.in:B0ABC12345" — dedupes re-adds
   group_id         TEXT,                   -- manual cross-store grouping (groups.id)
   category         TEXT,                   -- user-assigned shelf ("Shoes", "Camera gear"); NULL = uncategorized
+  availability     TEXT,                   -- 'InStock' | 'OutOfStock' | NULL (unknown), from JSON-LD / extension
+  alerted_below_target INTEGER NOT NULL DEFAULT 0, -- target-alert hysteresis: 1 = already alerted, re-arms when price > target
+  last_alert_at    TEXT,                   -- throttle for low/drop alerts (ISO 8601)
   delivery_text    TEXT,                   -- raw "FREE delivery Wednesday, 9 July" line, captured by the extension
   delivery_date    TEXT,                   -- parsed YYYY-MM-DD when the text was parseable
   delivery_pincode TEXT,                   -- pincode the page was showing when captured
@@ -50,3 +56,18 @@ CREATE TABLE IF NOT EXISTS groups (
   name       TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+-- Every alert ever raised (target hit / all-time low / 24h drop / restock).
+-- Powers the UI feed; delivered=1 means it was also pushed to Telegram.
+CREATE TABLE IF NOT EXISTS alerts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id TEXT NOT NULL,
+  type       TEXT NOT NULL,            -- target | low | drop | restock
+  price      REAL,                     -- price that triggered the alert
+  prev_price REAL,                     -- reference price (target / old low / 24h-ago)
+  message    TEXT NOT NULL,
+  at         TEXT NOT NULL,            -- ISO 8601
+  delivered  INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_at ON alerts (at);

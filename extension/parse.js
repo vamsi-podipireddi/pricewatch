@@ -26,7 +26,14 @@ function parseProductHtml(html) {
     return new RegExp(`<meta[^>]*content=["']([^"']+)["'][^>]*(?:property|name|itemprop)=["']${prop}["']`, 'i').exec(html)?.[1] ?? null;
   };
 
-  const out = { price: null, mrp: null, currency: null };
+  const out = { price: null, mrp: null, currency: null, availability: null };
+
+  const availabilityOf = (v) => {
+    if (typeof v !== 'string') return null;
+    const m = /(InStock|LimitedAvailability|InStoreOnly|OnlineOnly|OutOfStock|SoldOut|Discontinued)/i.exec(v);
+    if (!m) return null;
+    return /InStock|LimitedAvailability|InStoreOnly|OnlineOnly/i.test(m[1]) ? 'InStock' : 'OutOfStock';
+  };
 
   // 1. JSON-LD Product offers
   const ldRe = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
@@ -60,6 +67,7 @@ function parseProductHtml(html) {
       if (typeof offer.priceCurrency === 'string' && /^[A-Za-z]{3}$/.test(offer.priceCurrency)) {
         out.currency = offer.priceCurrency.toUpperCase();
       }
+      out.availability = availabilityOf(offer.availability);
       break;
     }
   }
