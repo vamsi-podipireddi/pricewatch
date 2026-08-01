@@ -59,6 +59,9 @@ async function scrapeTab(tabId) {
   }
 }
 
+// Every failure carries why it failed: "could not reach the server" is a very
+// different problem from "the server said 500" or "this page hid its price",
+// and the popup can only tell the user what to do if it knows which happened.
 async function captureTab(tab) {
   const cfg = await getCfg();
   if (!cfg.server) return { status: 'no-server' };
@@ -66,21 +69,36 @@ async function captureTab(tab) {
 
   const scraped = await scrapeTab(tab.id);
   const payload = buildPayload(scraped, tab.url, tab.title);
+  const url = baseOf(cfg) + '/api/products';
+  let res;
   try {
-    const res = await fetch(baseOf(cfg) + '/api/products', {
+    res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authOf(cfg) },
       body: JSON.stringify(payload),
     });
-    if (res.status === 401) return { status: 'auth' };
-    if (!res.ok) return { status: 'error' };
-    const data = await res.json().catch(() => ({}));
-    // A newly tracked product changes the origin set passive capture watches.
-    if (!data.existing) syncContentScripts().catch(() => {});
-    return { status: 'ok', existing: Boolean(data.existing), product: data.product ?? null };
-  } catch {
-    return { status: 'error' };
+  } catch (err) {
+    // Never reached the origin at all: server down, wrong URL, DNS, offline.
+    return { status: 'unreachable', detail: `${new URL(url).origin} — ${err?.message || 'network error'}` };
   }
+  if (res.status === 401) return { status: 'auth' };
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    let detail = `HTTP ${res.status}`;
+    try { detail += ` — ${JSON.parse(body).error}`; } catch { /* non-JSON body */ }
+    return { status: 'http-error', detail };
+  }
+  const data = await res.json().catch(() => ({}));
+  // A newly tracked product changes the origin set passive capture watches.
+  if (!data.existing) syncContentScripts().catch(() => {});
+  // The Worker only records an observation when a price came with it, so a page
+  // whose price we could not read is a no-op — say so rather than claim success.
+  return {
+    status: 'ok',
+    existing: Boolean(data.existing),
+    priced: payload.price != null,
+    product: data.product ?? null,
+  };
 }
 
 /* ---------- passive capture ---------- */

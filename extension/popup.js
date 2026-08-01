@@ -122,28 +122,46 @@ async function capture(busyLabel) {
   const btn = $('#record');
   btn.disabled = true;
   btn.textContent = busyLabel;
-  const r = await chrome.runtime.sendMessage({
-    kind: 'pw-capture-tab',
-    tab: { id: tab.id, url: tab.url, title: tab.title },
-  });
+  let r;
+  try {
+    r = await chrome.runtime.sendMessage({
+      kind: 'pw-capture-tab',
+      tab: { id: tab.id, url: tab.url, title: tab.title },
+    });
+  } catch (err) {
+    // The service worker died mid-capture, so no response ever came back.
+    r = { status: 'no-reply', detail: err?.message || 'background script did not respond' };
+  }
+
   if (r?.status === 'ok') {
+    // A capture with no price changed nothing — the store hid it from the page.
+    const note = !r.priced
+      ? `<span class="err">No price found on this page — nothing recorded.</span>`
+      : `<span class="ok">${r.existing ? 'Price recorded.' : 'Now tracking.'}</span>`;
     try {
       const p = await lookup();
-      if (p) return renderProduct(p, `<span class="ok">${r.existing ? 'Price recorded.' : 'Now tracking.'}</span>`);
+      if (p) return renderProduct(p, note);
     } catch { /* fall through to plain message */ }
-    renderMessage('Saved.');
-  } else {
-    const msg =
-      r?.status === 'auth'
-        ? 'Token rejected — fix it in Settings.'
-        : r?.status === 'no-server'
-          ? 'Set the server URL in Settings first.'
-          : 'Could not reach the server.';
-    const el = $('#result');
-    if (el) { el.textContent = msg; el.className = 'result err'; }
-    btn.disabled = false;
-    btn.textContent = 'Try again';
+    renderMessage(r.priced ? 'Saved.' : 'No price found on this page.');
+    return;
   }
+
+  const MSG = {
+    auth: 'Token rejected — fix it in Settings.',
+    'no-server': 'Set the server URL in Settings first.',
+    na: 'This page cannot be tracked — open the product page itself.',
+    unreachable: 'Could not reach the server.',
+    'http-error': 'The server rejected it.',
+    'no-reply': 'The extension background stopped before replying.',
+  };
+  const el = $('#result');
+  if (el) {
+    el.innerHTML =
+      `<span class="err">${esc(MSG[r?.status] || 'Capture failed.')}</span>` +
+      (r?.detail ? `<span class="detail">${esc(r.detail)}</span>` : '');
+  }
+  btn.disabled = false;
+  btn.textContent = 'Try again';
 }
 
 async function init() {

@@ -64,6 +64,8 @@
   .result { font-family: var(--mono); font-size: 10.5px; min-height: 16px; color: var(--dim); }
   .result .ok { color: var(--accent); }
   .result .err { color: var(--critical); }
+  /* Why it failed — the actionable half of an error message. */
+  .result .detail { display: block; margin-top: 3px; color: var(--dim); word-break: break-word; }
   footer {
     display: flex; justify-content: space-between; padding: 10px 14px;
     border-top: 1px solid var(--hairline);
