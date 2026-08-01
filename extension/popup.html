@@ -2,67 +2,76 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark">
 <style>
+  /* Same dark-glass system as the dashboard. Extension pages can't pull remote
+     webfonts under the default CSP, so this uses the closest system stacks. */
   :root {
-    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
-    --muted: #898781; --border: rgba(11,11,11,0.10); --hairline: #e1e0d9;
-    --accent: #eb6834; --good: #006300; --serious: #b25e00; --critical: #d03b3b;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --page: #0d0d0d; --surface: #1a1a19; --ink: #fff; --ink-2: #c3c2b7;
-      --muted: #898781; --border: rgba(255,255,255,0.10); --hairline: #2c2c2a;
-      --accent: #d95926; --good: #0ca30c; --serious: #ec9b3e; --critical: #e66767;
-    }
+    --page: #0a0b0d; --surface: rgba(255,255,255,0.04); --ink: #ecedef; --ink-2: #c4c8ce;
+    --muted: #8a9099; --dim: #6e737b; --border: rgba(255,255,255,0.09);
+    --hairline: rgba(255,255,255,0.07);
+    --accent: #5ce0a8; --accent-ink: #05140d; --good: #5ce0a8;
+    --serious: #efb65c; --critical: #f0837c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { color-scheme: light dark; }
+  html { color-scheme: dark; }
   body {
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     font-size: 13px; line-height: 1.45; color: var(--ink); background: var(--page);
-    width: 340px;
+    width: 340px; -webkit-font-smoothing: antialiased;
   }
   #app { padding: 14px 14px 10px; display: grid; gap: 10px; }
   .row { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .thumb {
-    width: 44px; height: 44px; border-radius: 8px; border: 1px solid var(--hairline);
+    width: 44px; height: 44px; border-radius: 9px; border: 1px solid var(--hairline);
     background: #fff; object-fit: contain; flex: none;
   }
-  .title { font-weight: 600; font-size: 13px; line-height: 1.3;
+  .title { font-weight: 500; font-size: 13px; line-height: 1.35;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .sub { font-size: 11.5px; color: var(--muted); }
-  .price-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-  .price { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .mrp { color: var(--muted); text-decoration: line-through; font-size: 12px; }
-  .pill {
-    display: inline-flex; padding: 1px 7px; border-radius: 999px;
-    font-size: 10.5px; font-weight: 700;
+  .sub {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--dim); margin-top: 3px;
   }
-  .pill-off { background: rgba(0,99,0,0.12); color: var(--good); }
-  .pill-target { background: rgba(235,104,52,0.12); color: var(--accent); }
-  .status { font-size: 11.5px; color: var(--muted); }
-  .status.ok { color: var(--good); }
+  .price-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .price { font-family: var(--mono); font-size: 22px; font-weight: 500; letter-spacing: -0.02em; }
+  .mrp { font-family: var(--mono); color: var(--dim); text-decoration: line-through; font-size: 11px; }
+  .pill {
+    display: inline-flex; padding: 2px 7px; border-radius: 5px;
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .pill-off { background: rgba(92,224,168,0.12); color: var(--accent); }
+  .pill-target { background: rgba(239,182,92,0.14); color: var(--serious); }
+  .status { font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; color: var(--dim); }
+  .status.ok { color: var(--accent); }
   .status.blocked { color: var(--serious); }
   .status.error { color: var(--critical); }
   svg.spark { display: block; width: 100%; height: 44px; }
   button {
     font: inherit; width: 100%; display: inline-flex; align-items: center; justify-content: center;
-    gap: 7px; padding: 8px 13px; border: 1px solid transparent; border-radius: 7px;
-    background: var(--accent); color: #fff; cursor: pointer; font-weight: 600;
+    gap: 7px; padding: 9px 13px; border: 1px solid transparent; border-radius: 9px;
+    background: var(--accent); color: var(--accent-ink); cursor: pointer; font-weight: 600;
+    box-shadow: 0 6px 22px -8px rgba(92,224,168,0.4);
   }
-  button:disabled { opacity: 0.6; cursor: default; }
-  button.ghost { background: var(--surface); border-color: var(--border); color: var(--ink); font-weight: 500; }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { opacity: 0.45; cursor: default; box-shadow: none; }
+  button.ghost {
+    background: var(--surface); border-color: var(--border); color: var(--ink-2);
+    font-weight: 400; box-shadow: none;
+  }
+  button.ghost:hover { background: rgba(255,255,255,0.07); color: var(--ink); filter: none; }
   .msg { color: var(--ink-2); padding: 6px 0; }
-  .result { font-size: 12px; min-height: 16px; }
-  .result.ok { color: var(--good); }
-  .result.err { color: var(--critical); }
+  .result { font-family: var(--mono); font-size: 10.5px; min-height: 16px; color: var(--dim); }
+  .result .ok { color: var(--accent); }
+  .result .err { color: var(--critical); }
   footer {
-    display: flex; justify-content: space-between; padding: 8px 14px;
-    border-top: 1px solid var(--hairline); font-size: 12px;
+    display: flex; justify-content: space-between; padding: 10px 14px;
+    border-top: 1px solid var(--hairline);
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
   }
-  footer a { color: var(--ink-2); text-decoration: none; cursor: pointer; }
-  footer a:hover { color: var(--ink); text-decoration: underline; }
+  footer a { color: var(--dim); text-decoration: none; cursor: pointer; }
+  footer a:hover { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 </style>
 </head>
 <body>

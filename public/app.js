@@ -14,6 +14,8 @@ const state = {
   dismissed: new Set(JSON.parse(localStorage.getItem('pricewatch.dismissed') || '[]')),
   query: '',
   sort: 'newest', // newest | priceAsc | priceDesc | discount | drop
+  listView: localStorage.getItem('pricewatch.listView') === 'cards' ? 'cards' : 'rows',
+  limit: 12, // entries rendered before "Load more"; resets whenever the view changes
   catFilter: null, // category name, UNCAT, or null = all
   showArchived: false,
   fullPoints: new Map(), // product id -> full history (list responses are ~90d windows)
@@ -22,6 +24,54 @@ const state = {
 
 const DAY = 86400_000;
 const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
+
+// Signal palette. `accent` tracks the signal-colour preference, so inline SVG
+// attributes (which can't read CSS vars reliably in every engine) stay in sync.
+const C = {
+  accent: '#5ce0a8',
+  amber: '#efb65c',
+  rose: '#f0837c',
+  dim: '#6e737b',
+  ink: '#ecedef',
+};
+
+/* ---------- appearance preferences ---------- */
+
+// The three knobs the design exposes: which colour carries "good news", how
+// tight the rows sit, and whether the page glows.
+const ACCENTS = [
+  ['#5ce0a8', 'Signal'],
+  ['#8aa8ff', 'Cobalt'],
+  ['#efb65c', 'Amber'],
+  ['#e4e7ea', 'Mono'],
+];
+const DENSITIES = [['comfortable', 'Comfortable'], ['compact', 'Compact']];
+
+const prefs = { accent: ACCENTS[0][0], density: 'comfortable', glow: true };
+try {
+  Object.assign(prefs, JSON.parse(localStorage.getItem('pricewatch.prefs') || '{}'));
+} catch {
+  /* corrupt prefs fall back to the defaults above */
+}
+// Never trust storage: an unknown accent would leave every signal colourless.
+if (!ACCENTS.some(([hex]) => hex === prefs.accent)) prefs.accent = ACCENTS[0][0];
+if (!DENSITIES.some(([v]) => v === prefs.density)) prefs.density = 'comfortable';
+prefs.glow = prefs.glow !== false;
+
+function applyPrefs() {
+  const root = document.documentElement;
+  root.style.setProperty('--accent', prefs.accent);
+  root.dataset.density = prefs.density;
+  root.dataset.glow = prefs.glow ? 'on' : 'off';
+  C.accent = prefs.accent;
+}
+
+function savePrefs() {
+  localStorage.setItem('pricewatch.prefs', JSON.stringify(prefs));
+  applyPrefs();
+}
+
+applyPrefs();
 
 /* ---------- formatting ---------- */
 
@@ -78,6 +128,16 @@ function fmtCount(n) {
 const dateFmt = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short' });
 const dateDayFmt = new Intl.DateTimeFormat('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
 const dateTimeFmt = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+
+const timeFmt = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+// Alerts show wall-clock time when they landed today ("09:12" reads like an
+// event), and fall back to a date once they are older than that.
+function clockTime(iso) {
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return '';
+  return t >= new Date().setHours(0, 0, 0, 0) ? timeFmt.format(t) : dateFmt.format(t);
+}
 
 function relTime(iso) {
   if (!iso) return null;
@@ -168,7 +228,90 @@ function dealMeta(p) {
   if (total < 7) return null; // too little history to judge
   const pct = Math.round((below / total) * 100);
   const label = pct >= 90 ? 'Excellent' : pct >= 70 ? 'Good' : pct >= 40 ? 'Fair' : 'High';
-  return { pct, label };
+  // pos runs the other way: 0 = cheapest it has been, 100 = dearest. The deal
+  // meter fills left-to-right, so it wants the position, not the score.
+  const pos = 100 - pct;
+  const color = pos < 25 ? C.accent : pos < 60 ? 'rgba(255,255,255,0.28)' : C.rose;
+  const cls = pct >= 70 ? 'deal-good' : pct >= 40 ? 'deal-fair' : 'deal-high';
+  return { pct, label, pos, color, cls };
+}
+
+// Low / typical / high of the last 90 days — the scale the deal meter sits on.
+function bandStats(p) {
+  const r = rangeStats(p, 90);
+  if (!r) return null;
+  const start = Date.now() - 90 * DAY;
+  const vals = [];
+  for (let i = 0; i <= 90; i++) {
+    const v = priceAt(p.points, start + i * DAY);
+    if (v != null) vals.push(v);
+  }
+  if (vals.length < 7) return null;
+  vals.sort((a, b) => a - b);
+  // n counts real observations, not the daily samples the median is taken from.
+  const n = p.points.filter((pt) => Date.parse(pt.t) >= start).length;
+  return { low: r.min, high: r.max, typical: vals[Math.floor(vals.length / 2)], n };
+}
+
+// One-line reading of where today's price sits. Near the low it quotes the gap
+// to the low (actionable); through the middle of the band it reads against the
+// typical price, because "31% above low" says nothing when low is an outlier.
+function dealNote(p) {
+  const price = currentPrice(p);
+  const band = bandStats(p);
+  if (price == null || !band) return 'building history';
+  if (price <= band.low + 0.009) return 'at 90-day low';
+  const over = Math.round(((price - band.low) / band.low) * 100);
+  if (over < 1) return 'at 90-day low';
+  const deal = dealMeta(p);
+  if (deal && deal.pos >= 25 && deal.pos < 70) {
+    const vsTypical = price / band.typical;
+    if (vsTypical < 0.97) return 'below typical';
+    if (vsTypical <= 1.03) return 'near typical';
+    return 'above typical';
+  }
+  return `${over}% above low`;
+}
+
+// How long since this product was last this cheap. Walks back a day at a time
+// and stops at the first day it cost the same or less; null once history runs
+// out, so a two-week-old product can't claim a two-week record.
+function cheapestInDays(p) {
+  const price = currentPrice(p);
+  if (price == null || !p.points || p.points.length < 3) return null;
+  const first = Date.parse(p.points[0].t);
+  const now = Date.now();
+  const span = Math.floor((now - first) / DAY);
+  if (span < 7) return null;
+  for (let d = 1; d <= span; d++) {
+    const v = priceAt(p.points, now - d * DAY);
+    if (v == null || v <= price + 0.009) return d - 1;
+  }
+  return span; // never been this cheap in the whole tracked window
+}
+
+// The headline verdict beside the deal meter, in the design's own register.
+function dealVerdict(p) {
+  const days = cheapestInDays(p);
+  if (days != null && days >= 7) return `cheapest in ${days} days`;
+  return dealNote(p);
+}
+
+const targetHit = (p) => p.targetPrice != null && currentPrice(p) != null && currentPrice(p) <= p.targetPrice + 0.009;
+
+// The mono flag that rides beside a product name. At most one, most urgent first.
+function flagOf(p) {
+  if (p.availability === 'OutOfStock') return { text: 'out of stock', cls: 'pill-oos' };
+  if (atTrackedLow(p)) return { text: 'all-time low', cls: 'pill-low' };
+  if (targetHit(p)) return { text: 'target hit', cls: 'pill-target' };
+  return null;
+}
+
+// Did this product get cheaper in the last 24 hours?
+function droppedToday(p) {
+  const now = currentPrice(p);
+  const then = priceAt(p.points, Date.now() - DAY);
+  return now != null && then != null && now < then - 0.009;
 }
 
 /* ---------- delivery ---------- */
@@ -302,6 +445,12 @@ function viewEntries() {
       if (vb == null) return -1;
       return (va - vb) * dir;
     });
+    // A group is one entry but renders as several rows, so its members have to
+    // follow the same direction — otherwise "price high to low" visibly steps
+    // back up inside every group.
+    if (mode === 'priceDesc') {
+      for (const e of visible) if (e.type === 'group') e.members.reverse();
+    }
   }
   return visible;
 }
@@ -502,6 +651,21 @@ function pwConfirm({ title = 'Are you sure?', message = '', confirmLabel = 'Conf
 
 /* ---------- header ---------- */
 
+// The cron fires on a fixed interval, so the next run is one interval past the
+// most recent check. Returns null once that moment has passed.
+function nextSweepIn(lastChecked, everyHours) {
+  const interval = everyHours * 3600_000;
+  const ms = Date.parse(lastChecked) + interval - Date.now();
+  if (!isFinite(ms) || ms <= 0) return null;
+  // A check stamped in the future (clock skew between the Worker and this
+  // browser) must never project a wait longer than the interval itself.
+  const mins = Math.round(Math.min(ms, interval) / 60_000);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
 function renderHeader() {
   const { products, meta } = state.data;
   const line = $('#sweep-line');
@@ -515,18 +679,131 @@ function renderHeader() {
   const cycleHours = products.length
     ? meta.sweepEveryHours * Math.ceil(products.length / meta.sweepBatch)
     : meta.sweepEveryHours;
-  if (!products.length) line.textContent = 'Nothing tracked yet';
-  else if (lastChecked) line.textContent = `Last check ${relTime(lastChecked)} · each product re-checked ~every ${cycleHours}h`;
-  else line.textContent = 'First check pending';
+
+  let pulse = 'pulse-idle';
+  let bits = ['nothing tracked yet'];
+  if (products.length && lastChecked) {
+    pulse = '';
+    const next = nextSweepIn(lastChecked, meta.sweepEveryHours);
+    bits = [
+      `swept ${relTime(lastChecked)}`,
+      next ? `next ${next}` : 'sweep due',
+      `${products.length} tracked`,
+    ];
+    line.title = `Every product is re-checked about every ${cycleHours}h`;
+  } else if (products.length) {
+    pulse = 'pulse-warn';
+    bits = ['first check pending', `${products.length} tracked`];
+  }
+  line.innerHTML =
+    `<span class="pulse ${pulse}"></span>` +
+    bits.map((b) => `<span>${esc(b.toUpperCase())}</span>`).join('<span class="sep">/</span>');
+
+  qEl.placeholder = products.length ? `Search ${products.length} products` : 'Search';
 
   $('#foot-line').textContent =
     `A Cloudflare cron checks ${meta.sweepBatch} products every ${meta.sweepEveryHours} hours, stalest first. ` +
     'Sites that block server checks stay fresh through your extension clicks.';
 }
 
+/* ---------- today + movers ---------- */
+
+// The strip above the list answers "what changed?" before the list answers
+// "what am I watching?". Empty of news, it stays out of the way entirely.
+function renderSummary() {
+  const root = $('#summary-section');
+  const products = state.data.products.filter((p) => currentPrice(p) != null);
+  if (state.showArchived || products.length < 2) {
+    root.innerHTML = '';
+    return;
+  }
+
+  const drops = products.filter(droppedToday);
+  const lows = products.filter(atTrackedLow);
+  const oos = products.filter((p) => p.availability === 'OutOfStock');
+  const midnight = new Date().setHours(0, 0, 0, 0);
+  const alertsToday = state.alerts.filter((a) => Date.parse(a.at) >= midnight).length;
+
+  const tags = [
+    lows.length ? `<span class="tag tag-low">${lows.length} all-time low</span>` : '',
+    alertsToday ? `<span class="tag tag-alert">${alertsToday} alert${alertsToday === 1 ? '' : 's'}</span>` : '',
+    oos.length ? `<span class="tag tag-oos">${oos.length} out of stock</span>` : '',
+  ].filter(Boolean);
+  if (!tags.length) tags.push(`<span class="tag">${products.length} tracked</span>`);
+
+  // Biggest 30-day movers, drops first — the ones worth a second look.
+  const movers = products
+    .map((p) => ({ p, d: delta30(p) }))
+    .filter((m) => m.d != null && Math.abs(m.d) > 0.005)
+    .sort((a, b) => a.d - b.d || Math.abs(b.d) - Math.abs(a.d))
+    .slice(0, 4);
+
+  if (!drops.length && !movers.length) {
+    root.innerHTML = '';
+    return;
+  }
+
+  root.innerHTML = `<div class="summary">
+    <div class="today">
+      <div class="mono-label">Today</div>
+      <div class="today-count">
+        <span class="n ${drops.length ? '' : 'n-flat'}">${drops.length}</span>
+        <span class="lbl">price drop${drops.length === 1 ? '' : 's'}</span>
+      </div>
+      <div class="today-tags">${tags.join('')}</div>
+    </div>
+    <div class="movers">${movers.map(moverHTML).join('')}</div>
+  </div>`;
+
+  root.querySelectorAll('.mover').forEach((el) =>
+    el.addEventListener('click', () => selectProduct(el.dataset.id))
+  );
+}
+
+const MOVER_TAGS = [
+  [(p) => p.availability === 'OutOfStock', 'out of stock', 'var(--rose)'],
+  [(p) => atTrackedLow(p), 'all-time low', 'var(--accent)'],
+  [(p) => targetHit(p), 'target hit', 'var(--amber)'],
+];
+
+function moverHTML({ p, d }) {
+  const deal = dealMeta(p);
+  const tag = MOVER_TAGS.find(([test]) => test(p));
+  const tagText = tag ? tag[1] : dealNote(p);
+  const tagColor = tag ? tag[2] : deal && deal.pct >= 70 ? 'var(--accent)' : 'var(--dim-2)';
+  return `<button class="mover" type="button" data-id="${p.id}">
+    <span class="mover-id">
+      ${thumbHTML(p)}
+      <span style="min-width:0">
+        <span class="mover-name">${esc(shortTitle(p.title || p.domain, 30))}</span>
+        <span class="mover-store">${esc(p.domain)}</span>
+      </span>
+    </span>
+    <span class="mover-figures">
+      <span>
+        <span class="mover-price">${fmtMoney(currentPrice(p), p.currency)}</span>
+        <span class="mover-delta" style="color:${deltaColor(d)}">${deltaText(d)}</span>
+      </span>
+      ${sparklineSVG(p, 76, 30)}
+    </span>
+    <span class="mover-tag" style="color:${tagColor}">${esc(tagText.toUpperCase())}</span>
+  </button>`;
+}
+
+function selectProduct(id) {
+  if (!id) return;
+  state.sel = id;
+  state.compare = null;
+  localStorage.setItem('pricewatch.sel', id);
+  render();
+  $('#detail-section').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
 /* ---------- sparkline ---------- */
 
-function sparklineSVG(p) {
+// Step-after sparkline, coloured by direction: green fell, rose rose. `area`
+// fills underneath, which reads better at card size than a bare line.
+function sparklineSVG(p, W = 76, H = 26, { area = false } = {}) {
   const start = Date.now() - 30 * DAY;
   const samples = [];
   for (let i = 0; i <= 30; i++) {
@@ -534,9 +811,9 @@ function sparklineSVG(p) {
     const v = priceAt(p.points, t);
     if (v != null) samples.push({ t, v });
   }
-  if (samples.length < 2) return '<span class="dim">—</span>';
+  if (samples.length < 2) return `<svg width="${W}" height="${H}" aria-hidden="true"></svg>`;
 
-  const W = 120, H = 28, P = 3;
+  const P = 3;
   let min = Infinity, max = -Infinity;
   for (const s of samples) { min = Math.min(min, s.v); max = Math.max(max, s.v); }
   if (min === max) { min -= 1; max += 1; }
@@ -549,18 +826,30 @@ function sparklineSVG(p) {
     d += i === 0 ? `M${px} ${py}` : `H${px}V${py}`; // step-after
   });
   const last = samples[samples.length - 1];
-  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">
-    <path d="${d}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-linejoin="round"/>
-    <circle cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="2.5" fill="var(--ink)"/>
+  const stroke = deltaColor(delta30(p));
+  const fill = area
+    ? `<path d="${d}V${H - P}H${x(samples[0].t).toFixed(1)}Z" fill="${stroke}" fill-opacity="0.1"/>`
+    : '';
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true" style="flex:none">
+    ${fill}
+    <path d="${d}" fill="none" stroke="${stroke}" stroke-width="1.4" stroke-linejoin="round"/>
+    <circle cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="2.2" fill="${stroke}"/>
   </svg>`;
 }
 
-function deltaHTML(d) {
-  if (d == null || !isFinite(d)) return '<span class="dim">—</span>';
+const deltaColor = (d) => (d == null || !isFinite(d) ? C.dim : d < -0.001 ? C.accent : d > 0.001 ? C.rose : C.dim);
+
+const deltaText = (d) => {
+  if (d == null || !isFinite(d)) return '—';
   const pct = Math.abs(d * 100).toFixed(1) + '%';
-  if (d < -0.001) return `<span class="delta delta-down">${icon('down')}${pct}</span>`;
-  if (d > 0.001) return `<span class="delta delta-up">${icon('up')}${pct}</span>`;
-  return '<span class="dim delta">0.0%</span>';
+  if (d < -0.001) return `▼ ${pct}`;
+  if (d > 0.001) return `▲ ${pct}`;
+  return '—';
+};
+
+function deltaHTML(d) {
+  const cls = d == null || !isFinite(d) ? 'delta-flat' : d < -0.001 ? 'delta-down' : d > 0.001 ? 'delta-up' : 'delta-flat';
+  return `<span class="delta ${cls}">${deltaText(d)}</span>`;
 }
 
 /* ---------- status ---------- */
@@ -585,60 +874,104 @@ function ratingInline(p) {
   return `<span class="rating-inline">${icon('star')}<span class="num">${p.rating.toFixed(1)}</span>${count}</span>`;
 }
 
-function deliveryInline(p) {
-  const d = deliveryInfo(p);
-  if (!d) return '';
-  return `<span class="deliv-inline ${d.stale ? 'deliv-stale' : ''} hide-sm" title="${esc(d.full)}">${icon('truck')}${esc(d.label)}</span>`;
-}
-
+// Rows carry price and movement only. MRP, discount, rating and delivery all
+// live in the detail panel — a scan column that says four things says none.
 function priceCellHTML(p, best) {
   const price = currentPrice(p);
-  const mrp = mrpOf(p);
-  const off = discountPct(p);
   if (price == null) return '<span class="dim">—</span>';
-  let sub = '';
-  if (mrp != null) {
-    sub = `<span class="price-sub"><span class="mrp-strike">${fmtMoney(mrp, p.currency)}</span>` +
-      (off ? `<span class="pill pill-off">-${off}%</span>` : '') + '</span>';
-  }
   return `<span class="price-wrap ${best ? 'price-best' : ''}">
-    <span class="price-lg num">${fmtMoney(price, p.currency)}</span>${sub}
+    <span class="price-lg">${fmtMoney(price, p.currency)}</span>
+    ${deltaHTML(delta30(p))}
   </span>`;
+}
+
+// Deal meter: a filled track where 0% is the cheapest this product has been in
+// 90 days. The ticker is today; the note spells out what the bar is saying.
+function meterHTML(p) {
+  const deal = dealMeta(p);
+  if (!deal) return `<div class="meter-note">${esc(dealNote(p))}</div>`;
+  return `<div class="meter">
+      <span class="fill" style="width:${deal.pos}%;background:${deal.color}"></span>
+      <span class="tick" style="left:${deal.pos}%"></span>
+    </div>
+    <div class="meter-note">${esc(dealNote(p))}</div>`;
+}
+
+function targetCellHTML(p) {
+  if (p.targetPrice == null) return '<span class="target-cell target-unset">not set</span>';
+  const hit = targetHit(p);
+  return `<span class="target-cell ${hit ? 'target-hit' : ''}">${fmtMoney(p.targetPrice, p.currency)}${hit ? ' ✓' : ''}</span>`;
 }
 
 function rowHTML(p, { inGroup = false, best = false } = {}) {
   const st = statusMeta(p);
+  const flag = best ? { text: 'best price', cls: 'pill-best' } : flagOf(p);
   const checkCell = state.selectMode
     ? `<td class="col-select"><input type="checkbox" class="rowcheck" data-check="${p.id}" ${
         state.selected.has(p.id) ? 'checked' : ''
       } aria-label="Select ${esc(p.title || p.domain)}"></td>`
     : '';
-  const metaBits = [
-    `<span class="prod-domain">${esc(p.domain)}</span>`,
-    ratingInline(p),
-    deliveryInline(p),
-    p.availability === 'OutOfStock' ? `<span class="pill pill-oos">out of stock</span>` : '',
-    best ? `<span class="pill pill-best">best price</span>` : '',
-    !inGroup && atTrackedLow(p) ? `<span class="pill pill-low">lowest yet</span>` : '',
-  ].filter(Boolean);
-  return `<tr data-id="${p.id}" class="${p.id === state.sel && !state.selectMode ? 'selected' : ''} ${inGroup ? 'in-group' : ''}"
+  const metaBits = [`<span class="prod-domain">${esc(p.domain)}</span>`];
+  return `<tr data-id="${p.id}" class="${p.id === state.sel && !state.selectMode ? 'selected' : ''} ${
+    inGroup ? 'in-group' : ''
+  } ${flag ? 'flagged' : ''}"
               tabindex="0" role="button" aria-label="Show ${esc(p.title || p.domain)}">
     ${checkCell}
-    <td>
+    <td class="col-prod">
       <div class="prod-cell">
         ${thumbHTML(p)}
         <div class="prod-main">
           <div class="prod-title">${esc(p.title || p.url)}</div>
           <div class="sub-meta">${metaBits.join('')}</div>
         </div>
+        ${flag ? `<span class="pill ${flag.cls}">${esc(flag.text)}</span>` : ''}
       </div>
     </td>
-    <td class="right">${priceCellHTML(p, best)}</td>
-    <td class="right">${deltaHTML(delta30(p))}</td>
+    <td class="col-deal">${meterHTML(p)}</td>
     <td class="col-spark">${sparklineSVG(p)}</td>
-    <td class="col-check"><span class="check-cell"><span class="status-dot ${st.dot}"></span>${esc(st.label)}</span></td>
-    <td class="right">${icon('chevron', 'chev')}</td>
+    <td class="right col-price">${priceCellHTML(p, best)}</td>
+    <td class="right col-target">${targetCellHTML(p)}</td>
+    <td class="right col-check"><span class="check-cell" title="${esc(st.label)}"><span>${esc(
+      relTime(p.lastChecked) || 'never'
+    )}</span><span class="status-dot ${st.dot}"></span></span></td>
   </tr>`;
+}
+
+// Card variant of the same row — same facts, art-led instead of scan-led.
+function cardHTML(p) {
+  const deal = dealMeta(p);
+  const flag = flagOf(p);
+  const price = currentPrice(p);
+  return `<button class="prod-card ${p.id === state.sel ? 'selected' : ''}" type="button" data-id="${p.id}">
+    <span class="pc-art">
+      ${p.image ? `<img src="${esc(p.image)}" alt="" loading="lazy">` : `<span class="thumb-ph">${icon('package')}</span>`}
+      ${flag ? `<span class="pill ${flag.cls}">${esc(flag.text)}</span>` : ''}
+      <span class="pc-store">${esc(p.domain)}</span>
+    </span>
+    <span class="pc-body">
+      <span class="pc-name">${esc(shortTitle(p.title || p.url, 64))}</span>
+      <span class="pc-figures">
+        <span>
+          <span class="pc-price">${price != null ? fmtMoney(price, p.currency) : '—'}</span>
+          <span class="pc-delta" style="color:${deltaColor(delta30(p))}">${deltaText(delta30(p))}</span>
+        </span>
+        ${sparklineSVG(p, 92, 34, { area: true })}
+      </span>
+      <span>
+        ${
+          deal
+            ? `<span class="meter"><span class="fill" style="width:${deal.pos}%;background:${deal.color}"></span><span class="tick" style="left:${deal.pos}%"></span></span>`
+            : ''
+        }
+        <span class="pc-meter-note">
+          <span>${esc(dealNote(p))}</span>
+          <span class="${targetHit(p) ? 'target-hit' : p.targetPrice == null ? 'target-unset' : ''}">${
+            p.targetPrice != null ? esc(fmtMoney(p.targetPrice, p.currency)) + (targetHit(p) ? ' ✓' : '') : 'no target'
+          }</span>
+        </span>
+      </span>
+    </span>
+  </button>`;
 }
 
 function groupHeadHTML(g, members, colCount) {
@@ -646,8 +979,10 @@ function groupHeadHTML(g, members, colCount) {
   const sameCur = new Set(priced.map((p) => p.currency)).size <= 1;
   let meta = `${members.length} stores`;
   if (priced.length && sameCur) {
-    const best = priced[0]; // members arrive cheapest-first
-    const worst = priced[priced.length - 1];
+    // Cheapest/dearest by value — member order follows the active sort.
+    const byPrice = [...priced].sort((a, b) => currentPrice(a) - currentPrice(b));
+    const best = byPrice[0];
+    const worst = byPrice[byPrice.length - 1];
     meta += ` · best <strong>${fmtMoney(currentPrice(best), best.currency)}</strong> at ${esc(best.domain)}`;
     if (priced.length > 1 && currentPrice(worst) > currentPrice(best)) {
       meta += ` · you save ${fmtMoney(currentPrice(worst) - currentPrice(best), best.currency)} vs ${esc(worst.domain)}`;
@@ -686,6 +1021,21 @@ function suggestHTML() {
   </div>`;
 }
 
+const PAGE = 12;
+const resetPaging = () => { state.limit = PAGE; };
+
+// A zero-result list should say which filters produced it — a search that
+// returns nothing because a category chip is still active reads as a broken
+// search otherwise.
+function emptyMatchHTML() {
+  const active = [
+    state.query.trim() ? `search “${esc(state.query.trim())}”` : '',
+    state.catFilter ? `category “${esc(state.catFilter)}”` : '',
+  ].filter(Boolean);
+  return `Nothing matches ${active.join(' and ')}.
+    <button class="link-btn" type="button" id="btn-clear-filters">Clear ${active.length > 1 ? 'them' : 'it'}</button>`;
+}
+
 function wireArchivedToggle(root) {
   $('#btn-archived', root)?.addEventListener('click', async () => {
     state.showArchived = !state.showArchived;
@@ -693,6 +1043,7 @@ function wireArchivedToggle(root) {
     state.selected.clear();
     state.compare = null;
     state.sel = null;
+    resetPaging();
     try {
       await loadState();
     } catch (err) {
@@ -728,13 +1079,20 @@ function renderWatch() {
   }
 
   const colCount = state.selectMode ? 7 : 6;
-  const entries = viewEntries();
+  const allEntries = viewEntries();
+  const matched = allEntries.reduce((n, e) => n + (e.type === 'single' ? 1 : e.members.length), 0);
+  // Long lists render a page at a time; a group counts as one entry so its
+  // members never get split across the fold.
+  const entries = allEntries.slice(0, state.limit);
   const shown = entries.reduce((n, e) => n + (e.type === 'single' ? 1 : e.members.length), 0);
+  const more = allEntries.length - entries.length;
   const entryHTML = (e) => {
     if (e.type === 'single') return rowHTML(e.p);
     const priced = e.members.filter((p) => currentPrice(p) != null);
     const sameCur = new Set(priced.map((p) => p.currency)).size <= 1;
-    const bestId = sameCur && priced.length > 1 ? priced[0].id : null;
+    // By value, not by position — member order follows the active sort.
+    const cheapest = priced.reduce((lo, p) => (lo && currentPrice(lo) <= currentPrice(p) ? lo : p), null);
+    const bestId = sameCur && priced.length > 1 ? cheapest.id : null;
     return (
       groupHeadHTML(e.g, e.members, colCount) +
       e.members.map((p) => rowHTML(p, { inGroup: true, best: p.id === bestId })).join('')
@@ -742,9 +1100,15 @@ function renderWatch() {
   };
   // Category sections only appear once something is categorized — a fresh
   // install keeps the familiar flat list.
+  // Category sections bucket the list alphabetically, which silently overrides
+  // any ordering applied across the whole list — "price low to high" would only
+  // hold *within* Audio, then restart inside Camera gear. So sections are for
+  // browsing the default order only: pick a sort or type a search and the list
+  // goes flat, globally ordered, the way the design shows it.
+  const grouped = products.some(catOf) && state.sort === 'newest' && !state.query.trim();
   const body = !entries.length
-    ? `<tr><td colspan="${colCount}"><div class="empty-inline">No products match — clear the search or filters.</div></td></tr>`
-    : products.some(catOf)
+    ? `<tr><td colspan="${colCount}"><div class="empty-inline">${emptyMatchHTML()}</div></td></tr>`
+    : grouped
       ? categorySections(entries)
           .map(
             (sec) =>
@@ -754,61 +1118,122 @@ function renderWatch() {
           .join('')
       : entries.map(entryHTML).join('');
 
-  const controls = `<div class="list-controls">
-      <span class="search-wrap">${icon('search')}<input id="q" placeholder="Search title, store, model…" value="${esc(state.query)}" autocomplete="off" aria-label="Search products"></span>
-      <select id="sort-sel" class="sort-sel" aria-label="Sort products">
-        ${SORTS.map(([v, l]) => `<option value="${v}" ${state.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
-      </select>
-    </div>`;
   const cats = allCategories();
-  const chips = cats.length
-    ? `<div class="chips">${[['', 'All'], ...cats.map((c) => [c, c]), [UNCAT, UNCAT]]
-        .map(([v, l]) => `<button class="chip" data-cat="${esc(v)}" aria-pressed="${(state.catFilter || '') === v}" type="button">${esc(l)}</button>`)
-        .join('')}</div>`
-    : '';
+  const catCount = (c) =>
+    products.filter((p) => (c === UNCAT ? !catOf(p) : (catOf(p) || '').toLowerCase() === c.toLowerCase())).length;
+  const chipDefs = cats.length
+    ? [['', 'All', products.length], ...cats.map((c) => [c, c, catCount(c)]), [UNCAT, 'Uncategorized', catCount(UNCAT)]]
+    : [];
+  const chips = `<span class="chips">${chipDefs
+    .filter(([v, , n]) => n > 0 || v === '')
+    .map(
+      ([v, l, n]) =>
+        `<button class="chip" data-cat="${esc(v)}" aria-pressed="${(state.catFilter || '') === v}" type="button">${esc(
+          l
+        )}<span class="chip-n">${n}</span></button>`
+    )
+    .join('')}<button class="chip chip-archive" id="btn-archived" type="button" aria-pressed="${
+    state.showArchived
+  }">${state.showArchived ? 'Tracking' : 'Archive'}</button></span>`;
+
+  const controls = `<div class="list-controls">
+      ${chips}
+      <span class="head-actions" style="margin-left:auto">
+        <span class="mono-label">Sort</span>
+        <select id="sort-sel" class="sort-sel" aria-label="Sort products">
+          ${SORTS.map(([v, l]) => `<option value="${v}" ${state.sort === v ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>
+        <span class="seg" role="group" aria-label="List layout">
+          <button type="button" data-view="rows" aria-pressed="${state.listView === 'rows'}">Rows</button>
+          <button type="button" data-view="cards" aria-pressed="${state.listView === 'cards'}">Cards</button>
+        </span>
+      </span>
+    </div>`;
+
+  // Cards flatten groups — the grid has no room for a group header, and the
+  // per-store comparison lives in the detail panel anyway.
+  const flat = entries.flatMap((e) => (e.type === 'single' ? [e.p] : e.members));
+  const grid = !flat.length
+    ? `<div class="empty-inline">${emptyMatchHTML()}</div>`
+    : `<div class="card-grid">${flat.map(cardHTML).join('')}</div>`;
 
   root.innerHTML = `<div class="card">
     <div class="card-head">
-      <span class="eyebrow">${state.showArchived ? 'Archived' : 'Tracking'} · ${shown === products.length ? products.length : `${shown} of ${products.length}`} ${products.length === 1 ? 'product' : 'products'}</span>
+      <span class="eyebrow">${state.showArchived ? 'Archived' : 'Watching'} · ${
+        shown === products.length ? products.length : `${shown} of ${products.length}`
+      }</span>
       <span class="head-actions">
-        <button class="btn btn-sm btn-ghost" id="btn-archived" type="button">
-          ${icon('archive')}<span>${state.showArchived ? 'Back to tracking' : 'Archived'}</span>
-        </button>
         <button class="btn btn-sm btn-ghost" id="btn-select" type="button">
           ${state.selectMode ? icon('x') : icon('check')}<span>${state.selectMode ? 'Done selecting' : 'Select'}</span>
         </button>
       </span>
     </div>
     ${controls}
-    ${chips}
     ${state.showArchived ? '' : suggestHTML()}
-    <table class="watch-table">
+    ${
+      state.listView === 'cards'
+        ? grid
+        : `<table class="watch-table">
       <thead><tr>
         ${state.selectMode ? '<th class="col-select"></th>' : ''}
-        <th>Product</th><th class="right">Price</th><th class="right">Δ 30d</th>
-        <th class="col-spark">Trend · 30d</th><th class="col-check">Status</th><th></th>
+        <th>Product</th><th class="col-deal">Deal vs 90 days</th><th class="col-spark">Trend</th>
+        <th class="right col-price">Price</th><th class="right col-target">Target</th><th class="right col-check">Last check</th>
       </tr></thead>
       <tbody>${body}</tbody>
-    </table>
+    </table>`
+    }
+    ${
+      shown
+        ? `<div class="list-foot">
+            <span>Showing ${shown} of ${matched === products.length ? products.length : `${matched} matched`}</span>
+            ${
+              more
+                ? `<button class="load-more" type="button" id="btn-more">Load more ↓</button>`
+                : `<span>${esc(
+                    state.query ? `Filtered by “${state.query}”` : SORTS.find(([v]) => v === state.sort)?.[1] || ''
+                  )}</span>`
+            }
+          </div>`
+        : ''
+    }
   </div>`;
 
   wireArchivedToggle(root);
-  const qEl = $('#q', root);
-  qEl.addEventListener('input', () => {
-    state.query = qEl.value;
-    renderWatch();
-    const q2 = $('#q');
-    q2.focus();
-    q2.setSelectionRange(q2.value.length, q2.value.length);
-  });
   $('#sort-sel', root).addEventListener('change', (e) => {
     state.sort = e.target.value;
+    resetPaging();
     renderWatch();
   });
-  root.querySelectorAll('.chip').forEach((ch) =>
+  root.querySelectorAll('[data-view]').forEach((b) =>
+    b.addEventListener('click', () => {
+      state.listView = b.dataset.view;
+      localStorage.setItem('pricewatch.listView', state.listView);
+      resetPaging();
+      renderWatch();
+    })
+  );
+  root.querySelectorAll('.chip[data-cat]').forEach((ch) =>
     ch.addEventListener('click', () => {
       state.catFilter = ch.dataset.cat || null;
+      resetPaging();
       renderWatch();
+    })
+  );
+  $('#btn-more', root)?.addEventListener('click', () => {
+    state.limit += PAGE;
+    renderWatch();
+  });
+  $('#btn-clear-filters', root)?.addEventListener('click', () => {
+    state.query = '';
+    state.catFilter = null;
+    qEl.value = '';
+    resetPaging();
+    renderWatch();
+  });
+  root.querySelectorAll('.prod-card').forEach((el) =>
+    el.addEventListener('click', () => {
+      if (state.selectMode) toggleSelected(el.dataset.id);
+      else selectProduct(el.dataset.id);
     })
   );
 
@@ -821,15 +1246,8 @@ function renderWatch() {
   root.querySelectorAll('tbody tr[data-id]').forEach((tr) => {
     const id = tr.dataset.id;
     const pick = () => {
-      if (state.selectMode) {
-        toggleSelected(id);
-        return;
-      }
-      state.sel = id;
-      state.compare = null;
-      localStorage.setItem('pricewatch.sel', state.sel);
-      render();
-      $('#detail-section').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      if (state.selectMode) toggleSelected(id);
+      else selectProduct(id);
     };
     tr.addEventListener('click', pick);
     tr.addEventListener('keydown', (e) => {
@@ -1033,58 +1451,112 @@ function openCompareForGroup(gid) {
 
 /* ---------- detail: tiles ---------- */
 
-function renderTiles(p) {
+// Headline: today's price at display size, the 30-day move beside it, and the
+// deal meter showing where that price sits inside its own 90-day band.
+function renderPriceHead(p) {
   const price = currentPrice(p);
-  const r90 = rangeStats(p, 90);
-  const d30 = delta30(p);
-  const atLow90 = price != null && r90 && price <= r90.min;
   const mrp = mrpOf(p);
   const off = discountPct(p);
-  const d = deliveryInfo(p);
   const deal = dealMeta(p);
+  const band = bandStats(p);
+  const d30 = delta30(p);
+  const cur = p.currency;
+  // The design pairs the percentage with the cash it represents — "8.3%" is
+  // abstract, "8.3% · ₹1,991" is the number you actually feel.
+  const then = priceAt(p.points, Date.now() - 30 * DAY);
+  const moved = price != null && then != null ? Math.abs(price - then) : null;
+
+  const context = [
+    mrp != null ? `<span class="mrp-strike">${fmtMoney(mrp, cur)}</span>` : '',
+    off ? `<span class="pill pill-off">${off}% off</span>` : '',
+    p.availability === 'OutOfStock' ? `<span class="pill pill-oos">out of stock</span>` : '',
+    atTrackedLow(p) ? `<span class="pill pill-low">all-time low</span>` : '',
+  ].filter(Boolean);
+
+  const meter = band
+    ? `<div class="meter-band"><span class="tick" style="left:${deal ? deal.pos : 50}%"></span></div>
+       <div class="meter-scale">
+         <span>${fmtMoney(band.low, cur)} <span class="u">low</span></span>
+         <span><b>${fmtMoney(band.typical, cur)}</b> <span class="u">typical</span></span>
+         <span>${fmtMoney(band.high, cur)} <span class="u">high</span></span>
+       </div>`
+    : `<div class="meter-note">The meter fills in once there is a week of history.</div>`;
+
+  return `<div class="price-head">
+    <div class="price-now">
+      <div class="mono-label">Current</div>
+      <div class="price-figure" style="margin-top:6px">
+        <span class="big">${price != null ? fmtMoney(price, cur) : '—'}</span>
+        ${
+          d30 != null && isFinite(d30) && Math.abs(d30) > 0.001
+            ? `<span class="move" style="color:${deltaColor(d30)}">${deltaText(d30)}${
+                moved ? ` · ${fmtMoney(moved, cur)}` : ''
+              } · 30d</span>`
+            : ''
+        }
+      </div>
+      ${context.length ? `<div class="price-context">${context.join('')}</div>` : ''}
+    </div>
+    <div class="deal-block">
+      <div class="deal-head">
+        <span class="mono-label">Deal meter · 90 days</span>
+        <span class="deal-verdict ${deal ? deal.cls : ''}">${esc(deal ? dealVerdict(p) : 'no reading yet')}</span>
+      </div>
+      ${meter}
+    </div>
+  </div>`;
+}
+
+function renderTiles(p) {
+  const price = currentPrice(p);
+  const band = bandStats(p);
+  const d = deliveryInfo(p);
   const target = p.targetPrice;
 
-  const priceExtra =
-    (mrp != null
-      ? `<span class="mrp-strike">${fmtMoney(mrp, p.currency)}</span>${off ? `<span class="pill pill-off">-${off}%</span>` : ''}`
-      : '') + (p.availability === 'OutOfStock' ? `<span class="pill pill-oos">out of stock</span>` : '');
+  // All-time low, and when it happened — a low from last May reads very
+  // differently from one set this morning.
+  let allLow = null;
+  let lowAt = null;
+  for (const pt of p.points) {
+    if (allLow == null || pt.p < allLow) { allLow = pt.p; lowAt = pt.t; }
+  }
+  let lowSub = 'since tracking began';
+  if (allLow != null && price != null) {
+    const below = price > allLow ? Math.round(((price - allLow) / price) * 1000) / 10 : 0;
+    lowSub = below
+      ? `${dateFmt.format(Date.parse(lowAt))} · ${below}% below now`
+      : 'today matches it';
+  }
 
   let targetSub = 'alerts you when the price drops to it';
   if (target != null && price != null) {
-    targetSub = price <= target ? 'target reached — check the alerts bell' : `${fmtMoney(price - target, p.currency)} above target`;
+    targetSub =
+      price <= target
+        ? 'hit — re-arms when it rises above'
+        : `${fmtMoney(price - target, p.currency)} above target`;
   }
 
   return `<div class="tiles">
-    <div class="tile"><div class="t-label">Current price</div>
-      <div class="t-value num">${price != null ? fmtMoney(price, p.currency) : '—'}${priceExtra}</div>
-      <div class="t-sub">${atTrackedLow(p) ? 'lowest tracked price' : esc(p.domain)}</div></div>
+    <div class="tile tile-low"><div class="t-label">All-time low</div>
+      <div class="t-value">${allLow != null ? fmtMoney(allLow, p.currency) : '—'}</div>
+      <div class="t-sub">${esc(lowSub)}</div></div>
+    <div class="tile"><div class="t-label">Typical · 90d</div>
+      <div class="t-value">${band ? fmtMoney(band.typical, p.currency) : '—'}</div>
+      <div class="t-sub">${
+        band ? `median of ${band.n} observations` : 'needs a week of history'
+      }</div></div>
     <div class="tile tile-target" data-act="target" role="button" tabindex="0" title="Set a target price — you get an alert when the price reaches it">
-      <div class="t-label">Target price</div>
-      <div class="t-value num">${icon('target')}${target != null ? fmtMoney(target, p.currency) : '<span class="dim">set…</span>'}</div>
+      <div class="t-label">Target</div>
+      <div class="t-value">${icon('target')}${target != null ? fmtMoney(target, p.currency) : '<span class="dim">Set…</span>'}</div>
       <div class="t-sub">${targetSub}</div></div>
-    <div class="tile"><div class="t-label">Deal meter</div>
-      <div class="t-value">${
-        deal
-          ? `<span class="${deal.pct >= 70 ? 'deal-good' : deal.pct < 40 ? 'deal-high' : ''}">${deal.label}</span>`
-          : '<span class="dim">—</span>'
-      }</div>
-      <div class="t-sub">${deal ? `cheaper than ${deal.pct}% of the last 90 days` : 'needs a week of history'}</div></div>
-    <div class="tile"><div class="t-label">90-day low</div>
-      <div class="t-value num">${r90 ? fmtMoney(r90.min, p.currency) : '—'}</div>
-      <div class="t-sub">${atLow90 ? 'price is at its 90-day low' : '&nbsp;'}</div></div>
-    <div class="tile"><div class="t-label">90-day high</div>
-      <div class="t-value num">${r90 ? fmtMoney(r90.max, p.currency) : '—'}</div><div class="t-sub">&nbsp;</div></div>
-    <div class="tile"><div class="t-label">Change · 30d</div>
-      <div class="t-value">${deltaHTML(d30)}</div><div class="t-sub">&nbsp;</div></div>
-    <div class="tile"><div class="t-label">Rating</div>
-      <div class="t-value">${p.rating != null ? `${icon('star')}<span class="num">${p.rating.toFixed(1)}</span>` : '<span class="dim">—</span>'}</div>
-      <div class="t-sub">${p.reviewCount != null ? `${Number(p.reviewCount).toLocaleString('en-IN')} ratings` : '&nbsp;'}</div></div>
     <div class="tile"><div class="t-label">Delivery</div>
-      <div class="t-value" ${d ? `title="${esc(d.full)}"` : ''}>${d ? `${icon('truck')}<span>${esc(d.label)}</span>` : '<span class="dim">—</span>'}</div>
+      <div class="t-value" ${d ? `title="${esc(d.full)}"` : ''}>${
+        d ? `${icon('truck')}<span>${esc(d.label)}</span>` : '<span class="dim">—</span>'
+      }</div>
       <div class="t-sub">${
         d
-          ? esc([p.deliveryPincode, relTime(p.deliveryAt)].filter(Boolean).join(' · ')) + (d.stale ? ' · re-click extension to refresh' : '')
-          : 'captured when you click the extension on the page'
+          ? esc([p.deliveryPincode, relTime(p.deliveryAt)].filter(Boolean).join(' · ')) + (d.stale ? ' · re-click extension' : '')
+          : 'captured on extension clicks'
       }</div></div>
   </div>`;
 }
@@ -1129,9 +1601,9 @@ function chartPoints(points, start, now, key = 'p') {
 const dateYearFmt = new Intl.DateTimeFormat('en-IN', { month: 'short', year: '2-digit' });
 
 // series: [{ label, color, currency, points }] — points are the raw API rows.
-// Single-series charts additionally draw the MRP as a dashed step line and a
-// dashed "typical" (median) guide.
-function drawChart(mount, seriesIn, days = 90) {
+// Single-series charts additionally draw the MRP as a dashed step line, a
+// dashed "typical" (median) guide, and the target price in amber.
+function drawChart(mount, seriesIn, days = 90, { target = null } = {}) {
   const { start, now } = chartWindow(seriesIn, days);
   const series = seriesIn
     .map((s) => ({ ...s, pts: chartPoints(s.points, start, now, 'p') }))
@@ -1142,8 +1614,10 @@ function drawChart(mount, seriesIn, days = 90) {
   }
 
   const width = Math.max(320, mount.clientWidth);
-  const H = 280;
-  const M = { t: 14, r: 18, b: 28, l: 64 };
+  const H = 286;
+  // Value labels sit to the RIGHT of the plot, where the latest price is —
+  // reading a chart you scan to the newest point, not back to the axis.
+  const M = { t: 14, r: 68, b: 30, l: 2 };
   const iw = width - M.l - M.r;
   const ih = H - M.t - M.b;
 
@@ -1167,6 +1641,7 @@ function drawChart(mount, seriesIn, days = 90) {
   for (const s of series) for (const pt of s.pts) { min = Math.min(min, pt.p); max = Math.max(max, pt.p); }
   if (mrpPts) for (const pt of mrpPts) { min = Math.min(min, pt.p); max = Math.max(max, pt.p); }
   if (median != null) { min = Math.min(min, median); max = Math.max(max, median); }
+  if (target != null) { min = Math.min(min, target); max = Math.max(max, target); }
   const pad = (max - min) * 0.06 || max * 0.02 || 1;
   min -= pad; max += pad;
 
@@ -1174,56 +1649,84 @@ function drawChart(mount, seriesIn, days = 90) {
   const y = (v) => M.t + (1 - (v - min) / (max - min)) * ih;
   const cur = series[0].currency;
   const xFmt = now - start > 330 * DAY ? dateYearFmt : dateFmt;
+  const LABEL = 'font-family="IBM Plex Mono, monospace" font-size="10.5" letter-spacing="0.06em"';
+
+  const labelX = M.l + iw + 10; // gutter every guide label shares
+
+  // All the right-hand labels compete for one narrow gutter. Named guides win
+  // (they carry meaning a gridline does not); a value label within 11px of an
+  // already-placed one is dropped rather than overprinted.
+  const taken = [];
+  const canPlace = (py) => taken.every((t) => Math.abs(t - py) >= 11);
+  const claim = (py) => { taken.push(py); return py; };
+
+  let guides = '';
+  if (mrpPts) {
+    const lastM = mrpPts[mrpPts.length - 1];
+    guides += `<text x="${labelX}" y="${claim(y(lastM.p)) + 4}" ${LABEL} fill="#8a9099">MRP</text>`;
+  }
+  if (target != null && canPlace(y(target))) {
+    guides += `<text x="${labelX}" y="${claim(y(target)) + 4}" ${LABEL} fill="${C.amber}">TARGET</text>`;
+  }
+  if (median != null && canPlace(y(median))) {
+    guides += `<text x="${labelX}" y="${claim(y(median)) + 4}" ${LABEL} fill="#8a9099">TYPICAL</text>`;
+  }
 
   let g = '';
   for (let i = 0; i <= 3; i++) {
     const v = min + ((max - min) * i) / 3;
     const py = y(v);
-    g += `<line x1="${M.l}" x2="${M.l + iw}" y1="${py}" y2="${py}" stroke="var(--hairline)" stroke-width="1"/>`;
-    g += `<text x="${M.l - 8}" y="${py + 4}" text-anchor="end" font-size="11" fill="var(--muted)" style="font-variant-numeric:tabular-nums">${fmtCompact(v, cur)}</text>`;
+    g += `<line x1="${M.l}" x2="${M.l + iw}" y1="${py}" y2="${py}" stroke="rgba(255,255,255,0.055)" stroke-width="1"/>`;
+    if (canPlace(py)) g += `<text x="${labelX}" y="${claim(py) + 4}" ${LABEL} fill="#5a5f66">${fmtCompact(v, cur)}</text>`;
   }
   for (let i = 0; i <= 4; i++) {
     const t = start + ((now - start) * i) / 4;
-    g += `<text x="${x(t)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">${xFmt.format(t)}</text>`;
+    const anchor = i === 0 ? 'start' : i === 4 ? 'end' : 'middle';
+    g += `<text x="${x(t)}" y="${H - 8}" text-anchor="${anchor}" ${LABEL} fill="#5a5f66">${xFmt
+      .format(t)
+      .toUpperCase()}</text>`;
   }
-  g += `<line x1="${M.l}" x2="${M.l + iw}" y1="${M.t + ih}" y2="${M.t + ih}" stroke="var(--baseline)" stroke-width="1"/>`;
 
   if (median != null) {
     const py = y(median);
-    g += `<line x1="${M.l}" x2="${M.l + iw}" y1="${py}" y2="${py}" stroke="var(--baseline)" stroke-dasharray="2 4" stroke-width="1"/>`;
-    g += `<text x="${M.l + iw}" y="${py - 4}" text-anchor="end" font-size="10.5" fill="var(--muted)">typical ${fmtCompact(median, cur)}</text>`;
+    g += `<line x1="${M.l}" x2="${M.l + iw}" y1="${py}" y2="${py}" stroke="rgba(255,255,255,0.22)" stroke-dasharray="1 5" stroke-width="1"/>`;
   }
-
+  if (target != null) {
+    const py = y(target);
+    g += `<line x1="${M.l}" x2="${M.l + iw}" y1="${py}" y2="${py}" stroke="${C.amber}" stroke-opacity="0.55" stroke-dasharray="5 4" stroke-width="1"/>`;
+  }
   if (mrpPts) {
     let d = '';
     mrpPts.forEach((pt, i) => {
       const px = x(pt.t).toFixed(1), py = y(pt.p).toFixed(1);
       d += i === 0 ? `M${px} ${py}` : `H${px}V${py}`;
     });
-    g += `<path d="${d}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 4" stroke-linejoin="round"/>`;
-    const lastM = mrpPts[mrpPts.length - 1];
-    g += `<text x="${x(lastM.t).toFixed(1) - 4}" y="${y(lastM.p) - 5}" text-anchor="end" font-size="10.5" fill="var(--muted)">MRP</text>`;
+    g += `<path d="${d}" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="1" stroke-dasharray="1 5" stroke-linejoin="round"/>`;
   }
+  g += guides;
 
   let defs = '';
-  series.forEach((s, si) => {
+  series.forEach((s) => {
     let d = '';
     s.pts.forEach((pt, i) => {
       const px = x(pt.t).toFixed(1), py = y(pt.p).toFixed(1);
       d += i === 0 ? `M${px} ${py}` : `H${px}V${py}`; // step-after
     });
     if (series.length === 1) {
-      // Soft area fill under a single line.
+      // Soft area fill under a single line, plus a glow on the line itself —
+      // the one place this design lets a stroke bloom.
       defs = `<defs><linearGradient id="pw-area" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stop-color="var(--series-1)" stop-opacity="0.16"/>
-        <stop offset="1" stop-color="var(--series-1)" stop-opacity="0.01"/>
+        <stop offset="0" stop-color="${C.accent}" stop-opacity="0.28"/>
+        <stop offset="1" stop-color="${C.accent}" stop-opacity="0"/>
       </linearGradient></defs>`;
       const first = s.pts[0], lastPt = s.pts[s.pts.length - 1];
       g += `<path d="${d}L${x(lastPt.t).toFixed(1)} ${M.t + ih}L${x(first.t).toFixed(1)} ${M.t + ih}Z" fill="url(#pw-area)" stroke="none"/>`;
     }
     const last = s.pts[s.pts.length - 1];
-    g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-    g += `<circle cx="${x(last.t).toFixed(1)}" cy="${y(last.p).toFixed(1)}" r="3.5" fill="${s.color}" stroke="var(--surface)" stroke-width="2"/>`;
+    const glow = series.length === 1 ? ` style="filter:drop-shadow(0 0 9px rgba(92,224,168,0.4))"` : '';
+    g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"${glow}/>`;
+    g += `<circle cx="${x(last.t).toFixed(1)}" cy="${y(last.p).toFixed(1)}" r="10" fill="${s.color}" fill-opacity="0.13"/>`;
+    g += `<circle cx="${x(last.t).toFixed(1)}" cy="${y(last.p).toFixed(1)}" r="3.6" fill="${s.color}"/>`;
   });
 
   const legend =
@@ -1237,7 +1740,7 @@ function drawChart(mount, seriesIn, days = 90) {
     aria-label="Price history, last 90 days">
     ${defs}
     ${g}
-    <line id="xhair" y1="${M.t}" y2="${M.t + ih}" stroke="var(--baseline)" stroke-dasharray="3 3" visibility="hidden"/>
+    <line id="xhair" y1="${M.t}" y2="${M.t + ih}" stroke="rgba(255,255,255,0.28)" stroke-dasharray="3 3" visibility="hidden"/>
     <g id="hover-dots"></g>
     <rect id="hover-zone" x="${M.l}" y="${M.t}" width="${iw}" height="${ih}" fill="transparent"/>
   </svg>`;
@@ -1263,7 +1766,7 @@ function drawChart(mount, seriesIn, days = 90) {
     for (const s of series) {
       const v = priceAt(s.points, clamped) ?? s.pts[0].p;
       if (v == null) continue;
-      dotHtml += `<circle cx="${px}" cy="${y(v)}" r="4.5" fill="${s.color}" stroke="var(--surface)" stroke-width="2"/>`;
+      dotHtml += `<circle cx="${px}" cy="${y(v)}" r="4" fill="#0a0b0d" stroke="${s.color}" stroke-width="1.8"/>`;
       rows +=
         series.length === 1
           ? `<div class="tt-row"><span class="dim">Price</span><span class="num">${fmtMoney(v, s.currency)}</span></div>`
@@ -1488,7 +1991,175 @@ function renderCompare(root) {
   });
 }
 
+/* ---------- sidebar panels ---------- */
+
+const unseenAlerts = () => {
+  const seen = localStorage.getItem('pricewatch.alertsSeen') || '';
+  return state.alerts.filter((a) => a.at > seen).length;
+};
+
+// Standing alerts feed. The bell dialog holds the full history; this shows the
+// three most recent so a drop you have not looked at yet is never a click away.
+function alertsCardHTML() {
+  if (!state.alerts.length) return '';
+  const unseen = unseenAlerts();
+  const rows = state.alerts.slice(0, 3).map((a) => {
+    const line = (a.message || '').split('\n')[1] || (a.message || '').split('\n')[0] || '';
+    const img = a.image
+      ? `<img class="thumb" src="${esc(a.image)}" alt="" loading="lazy">`
+      : `<span class="thumb-ph">${icon('package')}</span>`;
+    return `<div class="alert-row" data-pid="${esc(a.productId)}" role="button" tabindex="0">
+      ${img}
+      <div class="alert-main">
+        <div class="alert-title">${esc(shortTitle(a.title || a.url || 'Product', 44))}</div>
+        <div class="alert-msg">${esc(line)}</div>
+      </div>
+      <div class="alert-side">
+        <span class="alert-type alert-${esc(a.type)}">${esc(a.type)}</span>
+        <div class="alert-meta" title="${esc(relTime(a.at) || '')}">${esc(clockTime(a.at))}</div>
+      </div>
+    </div>`;
+  });
+  const delivered = state.alerts.slice(0, 3).some((a) => a.delivered);
+  return `<div class="card card-alerts">
+    <div class="panel-head">
+      <span class="mono-label label-alert">Alerts${unseen ? ` · ${unseen} new` : ''}</span>
+      <span class="panel-note">${
+        delivered ? `${icon('check', 'icon')}emailed` : state.data?.meta?.email ? 'email armed' : 'in-app only'
+      }</span>
+    </div>
+    ${rows.join('')}
+    <button class="panel-foot" type="button" data-act="all-alerts">All ${state.alerts.length} alerts</button>
+  </div>`;
+}
+
+function wireAlertsCard(root) {
+  root.querySelectorAll('.card-alerts .alert-row').forEach((row) => {
+    const go = () => {
+      const pid = row.dataset.pid;
+      if (state.data.products.some((p) => p.id === pid)) selectProduct(pid);
+    };
+    row.addEventListener('click', go);
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+    });
+  });
+  $('[data-act="all-alerts"]', root)?.addEventListener('click', openAlerts);
+}
+
+// Store comparison for a grouped product: every store carrying it, cheapest
+// first, with what each one costs you over the best price.
+function storesCardHTML(p) {
+  if (!p.groupId) return '';
+  const g = groupsById().get(p.groupId);
+  const members = state.data.products
+    .filter((x) => x.groupId === p.groupId && currentPrice(x) != null)
+    .sort((a, b) => currentPrice(a) - currentPrice(b));
+  if (!g || members.length < 2) return '';
+  const sameCur = new Set(members.map((m) => m.currency)).size === 1;
+  const best = currentPrice(members[0]);
+  const rows = members.map((m, i) => {
+    const price = currentPrice(m);
+    const over = price - best;
+    const note = !sameCur ? '' : i === 0 ? 'best' : `+${fmtMoney(over, m.currency)}`;
+    return `<div class="store-row ${m.id === p.id ? 'store-current' : ''}" data-id="${m.id}" role="button" tabindex="0">
+      <span class="store-dot" style="background:${SERIES_COLORS[i % SERIES_COLORS.length]}"></span>
+      <span class="store-name">${esc(m.domain)}</span>
+      <span class="store-price ${sameCur && i === 0 ? 'is-best' : ''}">${fmtMoney(price, m.currency)}</span>
+      <span class="store-note">${esc(note)}</span>
+    </div>`;
+  });
+  return `<div class="card card-stores">
+    <div class="panel-head">
+      <span class="mono-label">${icon('layers', 'icon')}Same product · ${members.length} stores</span>
+      <button class="btn btn-sm" type="button" data-act="compare-group">Compare</button>
+    </div>
+    ${rows.join('')}
+  </div>`;
+}
+
+// Everything about the listing that is not a price.
+function specsCardHTML(p) {
+  const avail =
+    p.availability === 'OutOfStock'
+      ? ['Out of stock', 'var(--rose)']
+      : p.availability === 'InStock'
+        ? ['In stock', 'var(--accent)']
+        : ['Not reported', 'var(--dim-2)'];
+  // Where the latest price actually came from: bot-walled stores are kept
+  // fresh by extension clicks, everything else by the server sweep.
+  const when = relTime(p.lastChecked);
+  const source = !p.lastChecked
+    ? ['Not checked yet', 'var(--faint-2)']
+    : p.lastStatus === 'blocked'
+      ? [`Extension · ${when}`, 'var(--amber)']
+      : p.lastStatus === 'error'
+        ? [`Check failed · ${when}`, 'var(--rose)']
+        : [`Server check · ${when}`, ''];
+  const specs = [
+    ['Model number', p.model || 'not detected', p.model ? '' : 'var(--faint-2)'],
+    ['Availability', avail[0], avail[1]],
+    ['Observations', `${p.points.length} in 90 days`, ''],
+    ['Source', source[0], source[1]],
+    ['Category', catOf(p) || 'none', catOf(p) ? '' : 'var(--faint-2)'],
+  ];
+  return `<div class="card card-specs">
+    <div class="panel-head"><span class="mono-label">Details</span></div>
+    <div class="spec-list">
+      ${specs
+        .map(
+          ([k, v, color]) =>
+            `<div class="spec-row"><span class="spec-k">${k}</span><span class="spec-v"${
+              color ? ` style="color:${color}"` : ''
+            }>${esc(v)}</span></div>`
+        )
+        .join('')}
+      <a class="btn" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">
+        Open on ${esc(p.domain)}${icon('external')}
+      </a>
+    </div>
+  </div>`;
+}
+
+// Narrow screens lose the four-across tiles, so the target — the one tile you
+// act on — gets its own callout under them, as in the mobile design.
+function targetCalloutHTML(p) {
+  const price = currentPrice(p);
+  const t = p.targetPrice;
+  const hit = targetHit(p);
+  const line = t == null
+    ? 'No target set'
+    : hit
+      ? `Target ${fmtMoney(t, p.currency)} — hit`
+      : `Target ${fmtMoney(t, p.currency)} — ${price != null ? `${fmtMoney(price - t, p.currency)} to go` : 'waiting'}`;
+  const sub = t == null ? 'Tap to set one' : hit ? 'Re-arms when it rises above · tap to edit' : 'Tap to edit';
+  return `<button class="target-callout ${hit ? 'is-hit' : ''}" type="button" data-act="target">
+    ${icon('target')}
+    <span class="tc-main"><span class="tc-line">${esc(line)}</span><span class="tc-sub">${esc(sub)}</span></span>
+  </button>`;
+}
+
 /* ---------- detail ---------- */
+
+// The right-hand column: what needs attention, where else it is sold, and
+// everything about the listing that is not a price.
+function renderSide() {
+  const root = $('#side-section');
+  const p = state.compare ? null : state.data.products.find((x) => x.id === state.sel);
+  root.innerHTML = alertsCardHTML() + (p ? storesCardHTML(p) + specsCardHTML(p) : '');
+
+  wireAlertsCard(root);
+  if (p) {
+    $('[data-act="compare-group"]', root)?.addEventListener('click', () => openCompareForGroup(p.groupId));
+    root.querySelectorAll('.store-row').forEach((row) => {
+      const go = () => selectProduct(row.dataset.id);
+      row.addEventListener('click', go);
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+      });
+    });
+  }
+}
 
 function statusLineHTML(p) {
   const st = statusMeta(p);
@@ -1538,38 +2209,52 @@ function renderDetail() {
     <div class="detail-head">
       <div class="detail-id">
         ${thumbHTML(p)}
-        <div>
+        <div class="detail-meta">
           <h2>${esc(p.title || p.url)}</h2>
           <div class="detail-sub">
             <a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.domain)}</a>
-            ${p.model ? `<span>·</span><span title="Model number">${esc(p.model)}</span>` : ''}
-            <span>·</span>
+            ${p.model ? `<span class="sep">/</span><span title="Model number">${esc(p.model)}</span>` : ''}
+            ${p.rating != null ? `<span class="sep">/</span>${ratingInline(p)}` : ''}
+            ${
+              p.availability
+                ? `<span class="sep">/</span><span class="${
+                    p.availability === 'OutOfStock' ? 'avail-out' : 'avail-in'
+                  }">${p.availability === 'OutOfStock' ? 'out of stock' : 'in stock'}</span>`
+                : ''
+            }
+            <span class="sep">/</span>
             ${statusLineHTML(p)}
-            ${catOf(p) ? `<span class="group-chip" title="Category">${icon('tag')}${esc(catOf(p))}</span>` : ''}
-            ${gname ? `<span class="group-chip" title="In group">${icon('layers')}${esc(gname)}
-              <button type="button" data-act="leave-group" title="Remove from group" aria-label="Remove from group">${icon('x')}</button></span>` : ''}
+            ${catOf(p) ? `<span class="tag">${esc(catOf(p))}</span>` : ''}
+            ${gname ? `<span class="tag tag-low">${esc(gname)}
+              <button type="button" class="btn-ghost" data-act="leave-group" style="border:none;background:none;cursor:pointer;padding:0 0 0 4px" title="Remove from group" aria-label="Remove from group">${icon('x')}</button></span>` : ''}
           </div>
         </div>
       </div>
-      <div class="detail-actions">
-        <button class="btn btn-icon" data-act="rename" title="Rename" aria-label="Rename product">${icon('pencil')}</button>
-        <button class="btn btn-icon" data-act="category" title="Set category" aria-label="Set category">${icon('tag')}</button>
-        <button class="btn btn-icon" data-act="refresh" title="Check price now" aria-label="Check price now">${icon('refresh')}</button>
-        <a class="btn btn-icon" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer" title="Open product page" aria-label="Open product page">${icon('external')}</a>
-        <button class="btn btn-icon" data-act="archive" title="${p.archived ? 'Restore to tracking' : 'Archive (keeps history, stops checks)'}" aria-label="${p.archived ? 'Unarchive' : 'Archive'}">${icon('archive')}</button>
-        <button class="btn btn-icon" data-act="delete" title="Stop tracking" aria-label="Stop tracking">${icon('trash')}</button>
+      <div class="detail-tools">
+        ${rangeSegHTML()}
+        <div class="detail-actions">
+          ${toggle}
+          <button class="btn btn-icon" data-act="rename" title="Rename" aria-label="Rename product">${icon('pencil')}</button>
+          <button class="btn btn-icon" data-act="category" title="Set category" aria-label="Set category">${icon('tag')}</button>
+          <button class="btn btn-icon" data-act="refresh" title="Check price now" aria-label="Check price now">${icon('refresh')}</button>
+          <a class="btn btn-icon" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer" title="Open product page" aria-label="Open product page">${icon('external')}</a>
+          <button class="btn btn-icon" data-act="archive" title="${p.archived ? 'Restore to tracking' : 'Archive (keeps history, stops checks)'}" aria-label="${p.archived ? 'Unarchive' : 'Archive'}">${icon('archive')}</button>
+          <button class="btn btn-icon" data-act="delete" title="Stop tracking" aria-label="Stop tracking">${icon('trash')}</button>
+        </div>
       </div>
     </div>
-    ${renderTiles(p)}
-    <div class="chart-tools"><span class="eyebrow">Price history · ${rangeLabel()}</span><span class="head-actions">${rangeSegHTML()}${toggle}</span></div>
+    ${renderPriceHead(p)}
     ${bodyHTML}
+    ${renderTiles(p)}
+    ${targetCalloutHTML(p)}
   </div>`;
 
   if (hasPts && state.chartMode === 'chart') {
     drawChart(
       $('#chart-mount', root),
       [{ label: p.domain, color: SERIES_COLORS[0], currency: p.currency, points: pts }],
-      state.chartDays
+      state.chartDays,
+      { target: p.targetPrice ?? null }
     );
   }
   wireRangeSeg(root, renderDetail);
@@ -1729,9 +2414,11 @@ function openAlerts() {
           <div class="alert-main">
             <div class="alert-title">${esc(shortTitle(a.title || a.url || 'Product', 64))}</div>
             <div class="alert-msg">${esc(line)}</div>
-            <div class="alert-meta">${relTime(a.at) || ''}${a.delivered ? ' · emailed' : ''}</div>
           </div>
-          <span class="alert-type alert-${esc(a.type)}">${icon(ALERT_ICON[a.type] || 'alert')}${esc(a.type)}</span>
+          <div class="alert-side">
+            <span class="alert-type alert-${esc(a.type)}">${icon(ALERT_ICON[a.type] || 'alert')}${esc(a.type)}</span>
+            <div class="alert-meta">${esc(relTime(a.at) || '')}${a.delivered ? ' · emailed' : ''}</div>
+          </div>
         </div>`;
       })
       .join('');
@@ -1786,11 +2473,30 @@ function renderHealth() {
 
 function render() {
   renderHeader();
+  renderSummary();
   renderWatch();
   renderDetail();
+  renderSide();
   renderHealth();
   updateAlertDot();
 }
+
+// Search lives in the top bar, so it survives list re-renders and never has to
+// hand focus back to itself mid-typing.
+const qEl = $('#q');
+qEl.addEventListener('input', () => {
+  state.query = qEl.value;
+  resetPaging();
+  if (state.data) renderWatch();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || document.querySelector('dialog[open]')) return;
+  e.preventDefault();
+  qEl.focus();
+  qEl.select();
+});
 
 $('#btn-check-all').addEventListener('click', () => checkAll().catch((err) => toast(err.message)));
 
@@ -1820,8 +2526,50 @@ function fillCatList() {
 }
 
 $('#btn-add').addEventListener('click', () => { fillCatList(); $('#dlg-add').showModal(); });
+// Appearance changes apply live — you pick a colour and the board is already
+// wearing it, so Save only ever concerns the token.
+function renderPrefControls() {
+  $('#pref-accent').innerHTML = ACCENTS.map(
+    ([hex, name]) =>
+      `<button type="button" class="swatch" data-accent="${hex}" role="radio" aria-checked="${
+        prefs.accent === hex
+      }" title="${name}" aria-label="${name}"><span style="background:${hex}"></span></button>`
+  ).join('');
+  $('#pref-density').innerHTML = DENSITIES.map(
+    ([v, l]) => `<button type="button" data-density="${v}" aria-pressed="${prefs.density === v}">${l}</button>`
+  ).join('');
+  $('#pref-glow').checked = prefs.glow;
+}
+
+function wirePrefControls() {
+  const repaint = () => {
+    savePrefs();
+    renderPrefControls();
+    if (state.data) render();
+  };
+  $('#pref-accent').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-accent]');
+    if (!b) return;
+    prefs.accent = b.dataset.accent;
+    repaint();
+  });
+  $('#pref-density').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-density]');
+    if (!b) return;
+    prefs.density = b.dataset.density;
+    repaint();
+  });
+  $('#pref-glow').addEventListener('change', (e) => {
+    prefs.glow = e.target.checked;
+    repaint();
+  });
+}
+
+wirePrefControls();
+
 $('#btn-settings').addEventListener('click', () => {
   $('#form-settings [name="token"]').value = token();
+  renderPrefControls();
   $('#dlg-settings').showModal();
 });
 

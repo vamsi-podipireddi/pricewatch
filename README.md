@@ -42,6 +42,12 @@ Chrome extension ──one click──► Worker API ──► D1 (products + pr
   checked against the product's target price, its all-time low, a 24h drop
   threshold, and availability flips. Alerts land in an `alerts` table (the
   site's bell panel) and are emailed via the Gmail API when configured. See below.
+- **The dashboard is a signal board** — a "today" strip counts drops and
+  surfaces the biggest movers, every row carries a deal meter showing where
+  today's price sits in its own 90-day band, and the selected product opens a
+  panel with its chart, store comparison and specs. The list renders as rows
+  or cards, a page at a time. Signal colour, row density and the ambient glow
+  are in Settings; they are browser-local, like the API token.
 - **The extension is the bot-wall workaround.** Amazon/Flipkart usually block
   datacenter IPs, so server-side checks can fail on those sites. The popup
   scrapes the page you're already looking at (real browser, real session) and
@@ -63,7 +69,7 @@ Chrome extension ──one click──► Worker API ──► D1 (products + pr
 
 ## Price alerts
 
-Set a target on any product (its **Target price** tile). Every observation —
+Set a target on any product (its **Target** tile). Every observation —
 cron, popup, passive capture, auto-sync — then checks four triggers:
 
 | Type | Fires when | Repeat behaviour |
@@ -74,7 +80,10 @@ cron, popup, passive capture, auto-sync — then checks four triggers:
 | `restock` | availability flips OutOfStock → InStock | on each flip |
  Alerts always land in the site's bell panel. To also get them **emailed to
 your Gmail inbox**, the Worker sends through the Gmail API from your own
-account — free, no third-party mail service. One-time setup:
+account — free, no third-party mail service. Mail goes out as
+`multipart/alternative`: an HTML card carrying the price, a 90-day history
+strip and the low/typical stats, plus a plain-text copy for clients that
+refuse HTML. One-time setup:
 
 1. [console.cloud.google.com](https://console.cloud.google.com) → create a
    project → *APIs & Services* → *Library* → enable **Gmail API**.

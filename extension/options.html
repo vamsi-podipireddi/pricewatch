@@ -3,60 +3,83 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark">
 <title>PriceWatch — Settings</title>
 <style>
+  /* Same dark-glass system as the dashboard. Extension pages can't pull remote
+     webfonts under the default CSP, so this uses the closest system stacks. */
   :root {
-    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
-    --muted: #898781; --border: rgba(11,11,11,0.10); --accent: #eb6834;
-    --good: #006300; --critical: #d03b3b;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --page: #0d0d0d; --surface: #1a1a19; --ink: #fff; --ink-2: #c3c2b7;
-      --muted: #898781; --border: rgba(255,255,255,0.10); --accent: #d95926;
-      --good: #0ca30c; --critical: #e66767;
-    }
+    --page: #08090a; --surface: #0e1013; --ink: #ecedef; --ink-2: #c4c8ce;
+    --muted: #8a9099; --dim: #6e737b; --border: rgba(255,255,255,0.09);
+    --accent: #5ce0a8; --accent-ink: #05140d; --good: #5ce0a8; --critical: #f0837c;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { color-scheme: light dark; }
+  html { color-scheme: dark; }
   body {
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     font-size: 14px; line-height: 1.5; color: var(--ink); background: var(--page);
     display: grid; place-items: start center; min-height: 100vh; padding: 48px 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Matches the dashboard's ambient glow so the two surfaces read as one app. */
+  body::before {
+    content: ""; position: fixed; inset: -240px -10% auto -10%; height: 700px;
+    pointer-events: none; z-index: 0;
+    background:
+      radial-gradient(60% 55% at 22% 0%, rgba(92,224,168,0.12), transparent 70%),
+      radial-gradient(50% 50% at 82% 8%, rgba(138,168,255,0.09), transparent 70%);
   }
   .card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    padding: 24px; width: min(460px, 100%); display: grid; gap: 14px;
+    position: relative; z-index: 1;
+    background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.018));
+    border: 1px solid rgba(255,255,255,0.075); border-radius: 18px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 30px 70px -40px rgba(0,0,0,0.9);
+    padding: 26px; width: min(460px, 100%); display: grid; gap: 16px;
   }
   .head { display: flex; align-items: center; gap: 12px; }
-  .head svg { width: 28px; height: 28px; color: var(--accent); }
-  h1 { font-size: 15px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
-  .sub { font-size: 12px; color: var(--muted); }
-  label { display: grid; gap: 5px; font-size: 12.5px; color: var(--ink-2); }
-  input {
-    font: inherit; padding: 8px 11px; border: 1px solid var(--border);
-    border-radius: 6px; background: var(--page); color: var(--ink);
+  .head svg { width: 20px; height: 20px; color: var(--accent); }
+  h1 { font-family: var(--mono); font-size: 13px; font-weight: 500; letter-spacing: 0.22em; text-transform: uppercase; }
+  .sub { font-size: 12px; color: var(--dim); }
+  label {
+    display: grid; gap: 6px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--dim);
   }
-  input::placeholder { color: var(--muted); }
-  select {
-    font: inherit; padding: 8px 11px; border: 1px solid var(--border);
-    border-radius: 6px; background: var(--page); color: var(--ink);
+  input, select {
+    font: inherit; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px; letter-spacing: 0; text-transform: none;
+    padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px;
+    background: rgba(255,255,255,0.03); color: var(--ink);
   }
-  label.check { display: flex; gap: 10px; align-items: flex-start; }
-  label.check input { width: 15px; height: 15px; margin-top: 2px; accent-color: var(--accent); flex: none; }
-  label.check .hint { display: block; margin-top: 2px; }
+  input:focus, select:focus { outline: none; border-color: rgba(92,224,168,0.3); }
+  input::placeholder { color: rgba(255,255,255,0.28); }
+  select option { background: #101215; color: var(--ink); }
+  label.check {
+    display: flex; gap: 10px; align-items: flex-start;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 12.5px; letter-spacing: 0; text-transform: none; color: var(--ink-2);
+  }
+  label.check input { width: 14px; height: 14px; margin-top: 3px; accent-color: var(--accent); flex: none; padding: 0; }
+  label.check .hint { display: block; margin-top: 3px; }
   .row { display: flex; gap: 8px; justify-content: flex-end; }
   button {
-    font: inherit; display: inline-flex; align-items: center; gap: 7px;
-    padding: 7px 13px; border: 1px solid var(--border); border-radius: 6px;
-    background: var(--surface); color: var(--ink); cursor: pointer;
+    font: inherit; font-size: 12.5px; display: inline-flex; align-items: center; gap: 7px;
+    height: 34px; padding: 0 14px; border: 1px solid var(--border); border-radius: 9px;
+    background: rgba(255,255,255,0.03); color: var(--ink-2); cursor: pointer;
+    transition: background 0.14s ease, color 0.14s ease;
   }
-  .primary { background: var(--accent); border-color: transparent; color: #fff; }
-  #status { font-size: 12.5px; min-height: 18px; }
-  #status.ok { color: var(--good); }
+  button:hover { background: rgba(255,255,255,0.07); color: var(--ink); }
+  .primary {
+    background: var(--accent); border-color: transparent; color: var(--accent-ink); font-weight: 600;
+    box-shadow: 0 6px 22px -8px rgba(92,224,168,0.4);
+  }
+  .primary:hover { background: var(--accent); color: var(--accent-ink); filter: brightness(1.08); }
+  #status { font-family: var(--mono); font-size: 11px; min-height: 18px; color: var(--dim); }
+  #status.ok { color: var(--accent); }
   #status.err { color: var(--critical); }
-  .hint { font-size: 12px; color: var(--muted); }
+  .hint { font-size: 12px; color: var(--dim); line-height: 1.6; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 </style>
 </head>
 <body>

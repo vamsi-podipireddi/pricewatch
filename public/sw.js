@@ -1,6 +1,6 @@
 // Minimal PWA service worker. Static shell is served stale-while-revalidate
 // (instant load, background refresh); /api/* never touches the cache.
-const CACHE = 'pricewatch-v1';
+const CACHE = 'pricewatch-v2';
 const SHELL = ['/', '/style.css', '/app.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
